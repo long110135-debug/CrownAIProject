@@ -183,6 +183,7 @@ def enrich_matches_with_stats(matches: list) -> list:
             continue
         
         standings = standings_cache[league_id]
+        league_name = m.get('league', '')
         
         home_name = m.get('home_team', '') or m.get('home', '')
         away_name = m.get('away_team', '') or m.get('away', '')
@@ -192,13 +193,41 @@ def enrich_matches_with_stats(matches: list) -> list:
         
         if home_stats:
             m['home_stats'] = _format_stats(home_stats)
+            _persist_team_stats(home_name, league_name, home_stats)
             enriched += 1
         if away_stats:
             m['away_stats'] = _format_stats(away_stats)
+            _persist_team_stats(away_name, league_name, away_stats)
             enriched += 1
     
     log.info(f"[充实] 完成: {enriched}个球队数据已匹配")
     return matches
+
+
+def _persist_team_stats(team_name: str, league: str, raw_stats: dict):
+    """将球队数据持久化到team_stats表，供analyze_matches()通过get_team_stats()读取"""
+    from utils.database import get_connection
+    stats = _format_stats(raw_stats)
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO team_stats
+            (team_name, league, season, rank, played, wins, draws, losses,
+             goals_for, goals_against, home_wins, away_wins, recent_form, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+        """, (
+            team_name, league, str(CURRENT_SEASON),
+            stats.get("rank", 0), stats.get("played", 0),
+            stats.get("wins", 0), stats.get("draws", 0), stats.get("losses", 0),
+            stats.get("goals_for", 0), stats.get("goals_against", 0),
+            stats.get("home_wins", 0), stats.get("away_wins", 0),
+            stats.get("recent_form", ""),
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning(f"[充实] 持久化{team_name}失败: {e}")
 
 
 def _match_team(name: str, standings: dict):
