@@ -35,6 +35,11 @@ def collect_observation() -> dict:
     }
 
     conn.close()
+
+    # 影子对照实验统计(独立查询，不需要cursor)
+    from utils.database import get_experiment_stats
+    result["shadow_experiment"] = get_experiment_stats()
+
     return result
 
 
@@ -410,6 +415,23 @@ def print_observation(data: dict):
         for n in near[:5]:
             hit_str = {1: "✓", 0: "✗", -1: "?"}.get(n["hit"], "?")
             print(f"  │ {hit_str} {n['home']} vs {n['away']} [{n['league']}] 指数{n['crown_index']} {n['score'] or ''}")
+        print(f"  └──────────────────────────────────────────")
+
+    # 影子对照实验
+    se = data.get("shadow_experiment", {})
+    if se.get("total", 0) > 0:
+        print(f"\n  ┌─ 影子对照: legacy vs consensus ────────────")
+        print(f"  │ 总记录: {se['total']} | 已结算: {se['settled']} | 待结算: {se['unsettled']}")
+        print(f"  │ 方向一致: {se['agree']} | 方向不一致: {se['disagree']}")
+        if se['settled'] > 0:
+            ld = se['legacy_dist']
+            cd = se['consensus_dist']
+            print(f"  │ legacy:    W{ld.get('win',0)} HW{ld.get('half_win',0)} P{ld.get('push',0)} HL{ld.get('half_loss',0)} L{ld.get('loss',0)} NB{ld.get('no_bet',0)} INV{ld.get('invalid',0)}")
+            print(f"  │ consensus: W{cd.get('win',0)} HW{cd.get('half_win',0)} P{cd.get('push',0)} HL{cd.get('half_loss',0)} L{cd.get('loss',0)} NB{cd.get('no_bet',0)} INV{cd.get('invalid',0)}")
+            print(f"  │ legacy PnL: {se['legacy_pnl']:+.1f} ({se['legacy_bet_count']}注) ROI={se['legacy_roi']}%")
+            print(f"  │ consensus PnL: {se['consensus_pnl']:+.1f} ({se['consensus_bet_count']}注) ROI={se['consensus_roi']}%")
+        else:
+            print(f"  │ (尚无已结算数据)")
         print(f"  └──────────────────────────────────────────")
 
     # 观察期进度

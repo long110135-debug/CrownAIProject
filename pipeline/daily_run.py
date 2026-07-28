@@ -284,6 +284,21 @@ def analyze_matches(hours_ahead: int = 6) -> dict:
             'odds_home_water': odds_data.get('home_odds', 0),
             'odds_away_water': odds_data.get('away_odds', 0)})
 
+        # === 影子对照实验: 记录legacy vs consensus ===
+        from pipeline.recommender import _consensus_direction
+        from utils.database import save_experiment
+        legacy_dir = sr.get('direction', 'neutral')
+        consensus_dir = _consensus_direction(model_results)
+        consensus_reason = _build_consensus_reason(model_results, consensus_dir)
+        save_experiment({
+            'match_id': match_id,
+            'model_version': MODEL_VERSION,
+            'legacy_recommend': legacy_dir,
+            'consensus_recommend': consensus_dir,
+            'consensus_weights': MODEL_WEIGHTS,
+            'consensus_reason': consensus_reason,
+        })
+
     log.info(f"[analyze] 完成: {len(results)}场 (A:{a_count} B:{b_count} C:{c_count}, L2淘汰:{len(l2_rejected)})")
 
     # 保存漏斗统计
@@ -420,6 +435,49 @@ def _resolve_fixture_id(client, match: dict, date_str: str):
 
 
 from utils.helpers import parse_match_time as _parse_time
+
+
+def _build_consensus_reason(model_results: dict, consensus_dir: str) -> str:
+    """
+    构建共识原因字符串，记录每个模型的投票详情。
+    格式: 每模型方向+权重+有效票 | 总有效权重 | 胜出权重 | 是否平票 | neutral是否参与
+    """
+    from config.settings import MODEL_WEIGHTS
+    parts = []
+    home_w = away_w = draw_w = 0.0
+    total_effective = 0.0
+
+    for name in ("strength", "handicap", "squad", "market", "ai_referee"):
+        result = model_results.get(name, {})
+        if not isinstance(result, dict):
+            parts.append(f"{name}:missing")
+            continue
+        direction = result.get("direction", "neutral")
+        confidence = result.get("confidence", 0) / 100
+        weight = MODEL_WEIGHTS.get(name, 0.1)
+        effective = weight * confidence
+
+        if direction == "home":
+            home_w += effective
+        elif direction == "away":
+            away_w += effective
+        elif direction == "draw":
+            draw_w += effective
+        # neutral不参与投票
+
+        if direction != "neutral":
+            total_effective += effective
+        parts.append(f"{name}:{direction}(w={weight},eff={effective:.3f})")
+
+    winner_w = max(home_w, away_w, draw_w)
+    is_tie = sum(1 for w in (home_w, away_w, draw_w) if abs(w - winner_w) < 0.001) > 1
+
+    parts.append(f"total_eff={total_effective:.3f}")
+    parts.append(f"winner={consensus_dir}(w={winner_w:.3f})")
+    parts.append(f"tie={'Y' if is_tie else 'N'}")
+    parts.append("neutral_excluded")
+
+    return " | ".join(parts)
 
 
 def _save_funnel(after_l1, after_l2, after_l3, a, b, c):

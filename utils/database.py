@@ -365,6 +365,26 @@ def init_db():
         )
     """)
 
+    # === v1.3 影子对照实验表 ===
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS recommendation_experiments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id TEXT UNIQUE NOT NULL,
+            model_version TEXT,
+            legacy_recommend TEXT,
+            consensus_recommend TEXT,
+            consensus_weights TEXT,
+            consensus_reason TEXT,
+            legacy_hit TEXT,
+            consensus_hit TEXT,
+            legacy_pnl REAL,
+            consensus_pnl REAL,
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            settled_at TEXT
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_experiments_match ON recommendation_experiments(match_id)")
+
     # === 索引 ===
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_match ON odds_snapshots(match_id, snapshot_time)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_timeline_match ON odds_timeline(match_id, record_time)")
@@ -1314,6 +1334,138 @@ def get_funnel_summary(days: int = 30) -> dict:
         "level_c": row["c"] or 0,
         "coverage_rate": round((row["a"] or 0) + (row["b"] or 0), 1) if synced == 0 else
                          round(((row["a"] or 0) + (row["b"] or 0)) / synced * 100, 1),
+    }
+
+
+# === v1.3 影子对照实验 ===
+
+def save_experiment(record: dict):
+    """
+    保存影子对照实验记录(幂等UPSERT，不覆盖已结算字段)
+    
+    record: {match_id, model_version, legacy_recommend, consensus_recommend,
+             consensus_weights, consensus_reason}
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO recommendation_experiments
+            (match_id, model_version, legacy_recommend, consensus_recommend,
+             consensus_weights, consensus_reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+            ON CONFLICT(match_id) DO UPDATE SET
+                model_version = excluded.model_version,
+                legacy_recommend = excluded.legacy_recommend,
+                consensus_recommend = excluded.consensus_recommend,
+                consensus_weights = excluded.consensus_weights,
+                consensus_reason = excluded.consensus_reason
+        """, (
+            record.get("match_id"),
+            record.get("model_version", ""),
+            record.get("legacy_recommend"),
+            record.get("consensus_recommend"),
+            json.dumps(record.get("consensus_weights", {}), ensure_ascii=False),
+            record.get("consensus_reason", ""),
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def settle_experiment(match_id: str, legacy_hit: str, consensus_hit: str,
+                      legacy_pnl: float = None, consensus_pnl: float = None):
+    """
+    结算影子实验(幂等: 已结算则跳过)
+    
+    hit值: win/half_win/push/half_loss/loss/no_bet/invalid
+    pnl: 单位收益(win=+1, half_win=+0.5, push=0, half_loss=-0.5, loss=-1, no_bet/invalid=None)
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        # 幂等: 已结算则不覆盖
+        cursor.execute("""
+            UPDATE recommendation_experiments
+            SET legacy_hit = ?, consensus_hit = ?, legacy_pnl = ?, consensus_pnl = ?,
+                settled_at = datetime('now', 'localtime')
+            WHERE match_id = ? AND settled_at IS NULL
+        """, (legacy_hit, consensus_hit, legacy_pnl, consensus_pnl, match_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_experiment_stats() -> dict:
+    """获取影子实验统计(observe报表用)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 基础统计
+    cursor.execute("SELECT COUNT(*) FROM recommendation_experiments")
+    total = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM recommendation_experiments WHERE settled_at IS NOT NULL")
+    settled = cursor.fetchone()[0]
+
+    # 方向一致性
+    cursor.execute("""
+        SELECT COUNT(*) FROM recommendation_experiments
+        WHERE legacy_recommend = consensus_recommend AND settled_at IS NOT NULL
+    """)
+    agree = cursor.fetchone()[0]
+
+    cursor.execute("""
+        SELECT COUNT(*) FROM recommendation_experiments
+        WHERE legacy_recommend != consensus_recommend AND settled_at IS NOT NULL
+    """)
+    disagree = cursor.fetchone()[0]
+
+    # legacy结算分布
+    cursor.execute("""
+        SELECT legacy_hit, COUNT(*) as cnt FROM recommendation_experiments
+        WHERE settled_at IS NOT NULL AND legacy_hit IS NOT NULL
+        GROUP BY legacy_hit
+    """)
+    legacy_dist = {row[0]: row[1] for row in cursor.fetchall()}
+
+    # consensus结算分布
+    cursor.execute("""
+        SELECT consensus_hit, COUNT(*) as cnt FROM recommendation_experiments
+        WHERE settled_at IS NOT NULL AND consensus_hit IS NOT NULL
+        GROUP BY consensus_hit
+    """)
+    consensus_dist = {row[0]: row[1] for row in cursor.fetchall()}
+
+    # PnL
+    cursor.execute("""
+        SELECT SUM(legacy_pnl), SUM(consensus_pnl),
+               COUNT(CASE WHEN legacy_pnl IS NOT NULL THEN 1 END),
+               COUNT(CASE WHEN consensus_pnl IS NOT NULL THEN 1 END)
+        FROM recommendation_experiments WHERE settled_at IS NOT NULL
+    """)
+    pnl_row = cursor.fetchone()
+    legacy_pnl = pnl_row[0] or 0
+    consensus_pnl = pnl_row[1] or 0
+    legacy_bet_count = pnl_row[2] or 0
+    consensus_bet_count = pnl_row[3] or 0
+
+    conn.close()
+
+    return {
+        "total": total,
+        "settled": settled,
+        "unsettled": total - settled,
+        "agree": agree,
+        "disagree": disagree,
+        "legacy_dist": legacy_dist,
+        "consensus_dist": consensus_dist,
+        "legacy_pnl": legacy_pnl,
+        "consensus_pnl": consensus_pnl,
+        "legacy_bet_count": legacy_bet_count,
+        "consensus_bet_count": consensus_bet_count,
+        "legacy_roi": round(legacy_pnl / legacy_bet_count * 100, 1) if legacy_bet_count > 0 else None,
+        "consensus_roi": round(consensus_pnl / consensus_bet_count * 100, 1) if consensus_bet_count > 0 else None,
     }
 
 

@@ -136,6 +136,9 @@ def auto_settle(target_date: str = None, settle_all: bool = False):
         # L4: 结果验证层
         _save_validation_record(pred, hit, winner, score_str, handicap_result)
 
+        # 影子对照实验结算
+        _settle_shadow_experiment(pred['match_id'], winner, handicap_result)
+
         settled_count += 1
         if hit == 1:
             hit_count += 1
@@ -351,6 +354,89 @@ def _save_validation_record(pred: dict, hit: int, winner: str, score_str: str, h
         "odds_pattern": odds_pattern,
         "recommendation_reason": "",
     })
+
+
+def _settle_shadow_experiment(match_id: str, winner: str, handicap_result: str):
+    """
+    结算影子对照实验(幂等: 已结算则跳过)
+    
+    方向结算规则(亚盘上下文):
+    - neutral → no_bet (不参与命中率)
+    - draw → invalid (亚盘不支持平局方向)
+    - home + winner=home → win (+1)
+    - home + winner=away → loss (-1)
+    - home + winner=draw + handicap_result=home_cover → win (+1)
+    - home + winner=draw + handicap_result=away_cover → loss (-1)
+    - home + winner=draw + handicap_result=push → push (0)
+    - away 同理反向
+    """
+    from utils.database import get_connection, settle_experiment
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT legacy_recommend, consensus_recommend, settled_at
+        FROM recommendation_experiments WHERE match_id = ?
+    """, (match_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return  # 无实验记录
+    if row["settled_at"]:
+        return  # 已结算，幂等跳过
+
+    legacy_hit = _direction_to_hit(row["legacy_recommend"], winner, handicap_result)
+    consensus_hit = _direction_to_hit(row["consensus_recommend"], winner, handicap_result)
+
+    legacy_pnl = _hit_to_pnl(legacy_hit)
+    consensus_pnl = _hit_to_pnl(consensus_hit)
+
+    settle_experiment(match_id, legacy_hit, consensus_hit, legacy_pnl, consensus_pnl)
+
+
+def _direction_to_hit(direction: str, winner: str, handicap_result: str) -> str:
+    """
+    将推荐方向与实际结果对比，产出结算结果。
+    
+    返回: win/half_win/push/half_loss/loss/no_bet/invalid
+    """
+    if not direction or direction == "neutral":
+        return "no_bet"
+    if direction == "draw":
+        return "invalid"  # 亚盘不支持平局方向
+
+    # 方向与实际胜者一致 → win
+    if direction == winner:
+        return "win"
+
+    # 方向与实际胜者相反
+    if winner == "draw":
+        # 平局时看让球结果
+        if handicap_result == "home_cover" and direction == "home":
+            return "win"
+        elif handicap_result == "away_cover" and direction == "away":
+            return "win"
+        elif handicap_result == "push":
+            return "push"
+        else:
+            return "loss"
+    else:
+        return "loss"
+
+
+def _hit_to_pnl(hit: str):
+    """结算结果转单位收益"""
+    pnl_map = {
+        "win": 1.0,
+        "half_win": 0.5,
+        "push": 0.0,
+        "half_loss": -0.5,
+        "loss": -1.0,
+        "no_bet": None,
+        "invalid": None,
+    }
+    return pnl_map.get(hit)
 
 
 def _analyze_error(pred: dict, actual: str, score_str: str) -> str:
