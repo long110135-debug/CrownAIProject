@@ -58,14 +58,14 @@ def acquire_lock(task_name: str) -> bool:
 
         # 检查互斥: 写同表的不能同时跑
         # track写closing_odds+prediction_history(CLV)
-        # close写closing_odds
-        # analyze写prediction_history
+        # close写closing_odds+prediction_history(CLV)
+        # analyze写prediction_history(save_prediction)
         # settle读closing_odds+写prediction_history
         mutex_map = {
             "track": {"analyze", "settle", "close"},
-            "analyze": {"track", "settle"},
+            "analyze": {"track", "settle", "close"},
             "settle": {"track", "analyze", "close"},
-            "close": {"track", "settle"},
+            "close": {"track", "settle", "analyze"},
         }
         mutex_tasks = mutex_map.get(task_name, set())
         for mutex_task in mutex_tasks:

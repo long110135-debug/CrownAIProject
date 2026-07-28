@@ -65,12 +65,9 @@ def normalize_league(crown_name: str) -> str:
 
 
 def normalize_date(date_str: str) -> str:
-    """统一日期格式: '07月20日' → '2026-07-20'"""
-    m = re.match(r'(\d{1,2})月(\d{1,2})日', date_str)
-    if m:
-        year = datetime.now().year
-        return f"{year}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
-    return date_str
+    """统一日期格式(委托到utils.helpers唯一实现，含跨年边界规则)"""
+    from utils.helpers import normalize_date as _normalize_date
+    return _normalize_date(date_str)
 
 
 def build_match_id(league: str, home: str, away: str, date: str) -> str:

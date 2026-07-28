@@ -49,7 +49,7 @@ TARGET_LEAGUES = [
 class CrownOddsScraper:
     """皇冠盘口抓取器(Playwright版)"""
 
-    def __init__(self, username: str, password: str, mid: str = '41883987'):
+    def __init__(self, username: str, password: str, mid: str = ''):
         if not HAS_PLAYWRIGHT:
             raise ImportError("需要安装playwright: pip3 install playwright && python3 -m playwright install chromium")
         self.username = username
@@ -459,13 +459,13 @@ class CrownOddsScraper:
             pass
 
 
-def scrape_crown_odds(username: str, password: str, mid: str = '41883987',
+def scrape_crown_odds(username: str, password: str, mid: str = '',
                       target_leagues: List[str] = None) -> List[dict]:
     """
     便捷函数: 抓取皇冠早盘盘口数据
 
     用法:
-        matches = scrape_crown_odds('long100003', 'long110135')
+        matches = scrape_crown_odds('your_username', 'your_password')
         for m in matches:
             print(f"{m['home']} vs {m['away']} | 让球{m['handicap']} 主水{m['home_water']}")
     """

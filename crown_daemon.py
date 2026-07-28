@@ -237,11 +237,17 @@ class CrownDaemon:
             )
             self.context.add_init_script('Object.defineProperty(navigator, "webdriver", {get: () => undefined});')
 
-            # 预设cookie跳过4pwd弹窗
-            mid = '41883987'
-            self.context.add_cookies([
-                {'name': f'box4pwd_notshow_{mid}', 'value': f'{mid}_Y', 'domain': '.hga050.com', 'path': '/'},
-            ])
+            # 预设cookie跳过4pwd弹窗(MID从钥匙串读取)
+            import subprocess as _sp
+            try:
+                mid = _sp.run(["security", "find-generic-password", "-s", "CrownAI_HGA_MID", "-w"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+            except Exception:
+                mid = ''
+            if mid:
+                self.context.add_cookies([
+                    {'name': f'box4pwd_notshow_{mid}', 'value': f'{mid}_Y', 'domain': '.hga050.com', 'path': '/'},
+                ])
 
             self.page = self.context.new_page()
 

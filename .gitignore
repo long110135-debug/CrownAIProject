@@ -17,3 +17,13 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Secrets & auth (never commit)
+.env
+.env.*
+cookies.json
+cookies/
+browser_state/
+auth_state/
+playwright_state/
+*.session
