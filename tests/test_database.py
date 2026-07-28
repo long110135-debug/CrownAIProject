@@ -73,6 +73,9 @@ class TestTaskLock(unittest.TestCase):
     def test_mutex_track_analyze(self):
         """track和analyze互斥"""
         from utils.task_lock import acquire_lock, release_lock
+        # 清理可能残留的锁(前次pipeline运行遗留)
+        release_lock("track")
+        release_lock("analyze")
         self.assertTrue(acquire_lock("track"))
         self.assertFalse(acquire_lock("analyze"))  # 互斥
         release_lock("track")
