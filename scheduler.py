@@ -51,7 +51,11 @@ def cmd_analyze():
 
 def cmd_close():
     from pipeline.daily_run import close_odds
-    close_odds()
+    try:
+        with TaskLock("close"):
+            close_odds()
+    except LockConflictError:
+        log.info("[close] 锁冲突，跳过本次")
 
 
 def cmd_settle():

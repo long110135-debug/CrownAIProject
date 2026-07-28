@@ -59,14 +59,6 @@ class TestMutexRelationships(unittest.TestCase):
         release_lock("sync")
         release_lock("track")
 
-    def test_daemon_independent_of_track(self):
-        """daemon与track不互斥(都写odds_timeline但append-only无UNIQUE)"""
-        # daemon不用task_lock，这里验证track不阻塞非互斥任务
-        self.assertTrue(acquire_lock("track"))
-        self.assertTrue(acquire_lock("close"))  # close不在互斥表中
-        release_lock("close")
-        release_lock("track")
-
     def test_release_allows_reacquire(self):
         """释放后可重新获取"""
         self.assertTrue(acquire_lock("track"))

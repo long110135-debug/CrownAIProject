@@ -11,11 +11,37 @@ v2.0 新增:
 """
 import sqlite3
 import json
+import time as _time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
 
 DB_PATH = Path(__file__).parent.parent / "data" / "crown.db"
+
+# SQLite写重试配置
+_RETRY_MAX = 3
+_RETRY_BACKOFF = [0.5, 1.0, 2.0]  # 秒
+
+
+def _retry_on_locked(fn):
+    """
+    包装SQLite写操作，遇到'database is locked'时有限重试。
+    最多3次，退避0.5s/1s/2s。超过后rollback+关闭连接+抛异常。
+    """
+    last_err = None
+    for attempt in range(_RETRY_MAX):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower():
+                raise
+            last_err = e
+            if attempt < _RETRY_MAX - 1:
+                _time.sleep(_RETRY_BACKOFF[attempt])
+    # 重试耗尽
+    from utils.logger import log
+    log.error(f"[DB] 写入重试{_RETRY_MAX}次仍失败: {last_err}")
+    raise last_err
 
 
 def get_connection() -> sqlite3.Connection:
@@ -654,50 +680,56 @@ def get_recent_predictions(days: int = 7, level: str = None) -> List[dict]:
 
 def save_timeline_record(match_id: str, odds_data: dict, phase: str = "early", source: str = "crown"):
     """
-    保存一条盘口时间线记录
+    保存一条盘口时间线记录(带并发写重试)
     
     phase: opening/early/prematch/closing/live
     odds_data: {handicap, home_water, away_water, over_line, over_water, under_water,
                 home_win, draw, away_win}
     """
-    import re
-    conn = get_connection()
-    cursor = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    def _do_write():
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # 判断是否是该比赛的首条记录(初盘)
-    cursor.execute("SELECT COUNT(*) FROM odds_timeline WHERE match_id = ?", (match_id,))
-    count = cursor.fetchone()[0]
-    is_first = 1 if count == 0 else 0
-    if is_first:
-        phase = "opening"
+            # 判断是否是该比赛的首条记录(初盘)
+            cursor.execute("SELECT COUNT(*) FROM odds_timeline WHERE match_id = ?", (match_id,))
+            count = cursor.fetchone()[0]
+            is_first = 1 if count == 0 else 0
+            actual_phase = "opening" if is_first else phase
 
-    # 盘口文字转数值
-    handicap_str = odds_data.get("handicap", "")
-    handicap_value = _handicap_to_number(handicap_str)
+            # 盘口文字转数值
+            handicap_str = odds_data.get("handicap", "")
+            handicap_value = _handicap_to_number(handicap_str)
 
-    cursor.execute("""
-        INSERT INTO odds_timeline
-        (match_id, phase, record_time, handicap, handicap_value,
-         home_water, away_water, over_line, over_water, under_water,
-         home_win, draw, away_win, source, is_first, is_closing)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        match_id, phase, now,
-        handicap_str, handicap_value,
-        _safe_float(odds_data.get("home_water")),
-        _safe_float(odds_data.get("away_water")),
-        odds_data.get("over_line", ""),
-        _safe_float(odds_data.get("over_water")),
-        _safe_float(odds_data.get("under_water")),
-        _safe_float(odds_data.get("home_win")),
-        _safe_float(odds_data.get("draw")),
-        _safe_float(odds_data.get("away_win")),
-        source, is_first,
-        1 if phase == "closing" else 0,
-    ))
-    conn.commit()
-    conn.close()
+            cursor.execute("""
+                INSERT INTO odds_timeline
+                (match_id, phase, record_time, handicap, handicap_value,
+                 home_water, away_water, over_line, over_water, under_water,
+                 home_win, draw, away_win, source, is_first, is_closing)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                match_id, actual_phase, now,
+                handicap_str, handicap_value,
+                _safe_float(odds_data.get("home_water")),
+                _safe_float(odds_data.get("away_water")),
+                odds_data.get("over_line", ""),
+                _safe_float(odds_data.get("over_water")),
+                _safe_float(odds_data.get("under_water")),
+                _safe_float(odds_data.get("home_win")),
+                _safe_float(odds_data.get("draw")),
+                _safe_float(odds_data.get("away_win")),
+                source, is_first,
+                1 if actual_phase == "closing" else 0,
+            ))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    _retry_on_locked(_do_write)
 
 
 def get_timeline(match_id: str) -> List[dict]:
@@ -742,12 +774,23 @@ def save_closing_odds(match_id: str, odds_data: dict, source: str = "crown"):
     """
     保存收盘赔率(比赛开始前最后一次抓取)
     用于CLV计算: 预测时赔率 vs 收盘赔率
+    
+    防旧覆盖: 只有当新记录的closing_time >= 已有记录时才更新。
+    避免较早的track快照覆盖较晚的close记录。
     """
     conn = get_connection()
     cursor = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     handicap_str = odds_data.get("handicap", "")
     handicap_value = _handicap_to_number(handicap_str)
+
+    # 检查是否已有记录，且已有记录更新
+    cursor.execute("SELECT closing_time FROM closing_odds WHERE match_id = ?", (match_id,))
+    existing = cursor.fetchone()
+    if existing and existing["closing_time"] and existing["closing_time"] > now:
+        # 已有记录比当前更新，不覆盖
+        conn.close()
+        return
 
     cursor.execute("""
         INSERT OR REPLACE INTO closing_odds
