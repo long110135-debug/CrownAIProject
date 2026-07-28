@@ -1,0 +1,19 @@
+# Runtime data
+data/crown.db
+data/crown.db-shm
+data/crown.db-wal
+data/logs/
+data/health_status.json
+data/watchdog_state.json
+
+# Generated reports
+output/*.html
+output/*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
