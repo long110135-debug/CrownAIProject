@@ -542,44 +542,75 @@ def get_team_stats(team_name: str, league: str = None) -> Optional[dict]:
 # === 预测历史（回测核心） ===
 
 def save_prediction(record: dict):
-    """保存一条预测记录（每场比赛分析后调用，含当时完整快照）"""
+    """
+    保存一条预测记录（每场比赛分析后调用，含当时完整快照）
+    
+    使用 ON CONFLICT DO UPDATE 只更新分析字段，绝不触碰结算字段
+    (result/result_score/hit/error_reason/settled_at/clv_*/closing_*)。
+    防止重复analyze摧毁已结算数据。
+    """
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO prediction_history
-        (match_id, league, home_team, away_team, kickoff,
-         asian_open, asian_live, crown_index,
-         strength_score, handicap_score, market_score, squad_score, ai_score,
-         data_completeness, recommend, level, confidence, predicted_at,
-         model_version, model_weights, ai_decision, odds_home_water, odds_away_water)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        record.get("match_id"),
-        record.get("league"),
-        record.get("home_team"),
-        record.get("away_team"),
-        record.get("kickoff"),
-        record.get("asian_open"),
-        record.get("asian_live"),
-        record.get("crown_index"),
-        record.get("strength_score"),
-        record.get("handicap_score"),
-        record.get("market_score"),
-        record.get("squad_score"),
-        record.get("ai_score"),
-        record.get("data_completeness", 0),
-        record.get("recommend"),
-        record.get("level"),
-        record.get("confidence"),
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        record.get("model_version", ""),
-        json.dumps(record.get("model_weights", {}), ensure_ascii=False),
-        record.get("ai_decision", ""),
-        record.get("odds_home_water"),
-        record.get("odds_away_water"),
-    ))
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO prediction_history
+            (match_id, league, home_team, away_team, kickoff,
+             asian_open, asian_live, crown_index,
+             strength_score, handicap_score, market_score, squad_score, ai_score,
+             data_completeness, recommend, level, confidence, predicted_at,
+             model_version, model_weights, ai_decision, odds_home_water, odds_away_water)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(match_id) DO UPDATE SET
+                league = excluded.league,
+                home_team = excluded.home_team,
+                away_team = excluded.away_team,
+                kickoff = excluded.kickoff,
+                asian_open = excluded.asian_open,
+                asian_live = excluded.asian_live,
+                crown_index = excluded.crown_index,
+                strength_score = excluded.strength_score,
+                handicap_score = excluded.handicap_score,
+                market_score = excluded.market_score,
+                squad_score = excluded.squad_score,
+                ai_score = excluded.ai_score,
+                data_completeness = excluded.data_completeness,
+                recommend = excluded.recommend,
+                level = excluded.level,
+                confidence = excluded.confidence,
+                predicted_at = excluded.predicted_at,
+                model_version = excluded.model_version,
+                model_weights = excluded.model_weights,
+                ai_decision = excluded.ai_decision,
+                odds_home_water = excluded.odds_home_water,
+                odds_away_water = excluded.odds_away_water
+        """, (
+            record.get("match_id"),
+            record.get("league"),
+            record.get("home_team"),
+            record.get("away_team"),
+            record.get("kickoff"),
+            record.get("asian_open"),
+            record.get("asian_live"),
+            record.get("crown_index"),
+            record.get("strength_score"),
+            record.get("handicap_score"),
+            record.get("market_score"),
+            record.get("squad_score"),
+            record.get("ai_score"),
+            record.get("data_completeness", 0),
+            record.get("recommend"),
+            record.get("level"),
+            record.get("confidence"),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            record.get("model_version", ""),
+            json.dumps(record.get("model_weights", {}), ensure_ascii=False),
+            record.get("ai_decision", ""),
+            record.get("odds_home_water"),
+            record.get("odds_away_water"),
+        ))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def settle_prediction(match_id: str, result: str, result_score: str, hit: int, error_reason: str = ""):
