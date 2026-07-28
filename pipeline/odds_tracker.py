@@ -22,9 +22,11 @@ from utils.database import (
 
 def save_scrape_snapshot(matches: List[dict], phase: str = "early"):
     """
-    将一次抓取的所有比赛盘口保存为快照 + 写入时间线
+    [DEPRECATED] 无调用方。盘口写入统一使用 crown_odds_collector.save_crown_odds()。
+    本函数绕过collector直接写odds_snapshots，且内联构造match_id（不做联赛名/日期标准化）。
+    保留仅供历史参考，新代码禁止调用。
     
-    参数:
+    原参数:
     - matches: CrownOddsScraper.scrape_all_early()的返回值
     - phase: 当前抓取阶段 (early/prematch/closing)
     """

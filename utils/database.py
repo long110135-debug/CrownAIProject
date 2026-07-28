@@ -20,9 +20,10 @@ DB_PATH = Path(__file__).parent.parent / "data" / "crown.db"
 
 def get_connection() -> sqlite3.Connection:
     """获取数据库连接"""
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -329,7 +330,12 @@ def init_db():
             clv_water REAL,
             closing_handicap TEXT,
             closing_home_water REAL,
-            closing_away_water REAL
+            closing_away_water REAL,
+            model_version TEXT,
+            model_weights TEXT,
+            ai_decision TEXT,
+            odds_home_water REAL,
+            odds_away_water REAL
         )
     """)
 
@@ -352,7 +358,7 @@ def init_db():
 
 
 def _migrate_prediction_clv(cursor, conn):
-    """为已有的prediction_history表添加CLV相关字段(兼容旧库)"""
+    """为已有的prediction_history表添加缺失字段(兼容旧库，可重复执行)"""
     try:
         cursor.execute("PRAGMA table_info(prediction_history)")
         columns = [row[1] for row in cursor.fetchall()]
@@ -362,6 +368,11 @@ def _migrate_prediction_clv(cursor, conn):
             "closing_handicap": "TEXT",
             "closing_home_water": "REAL",
             "closing_away_water": "REAL",
+            "model_version": "TEXT",
+            "model_weights": "TEXT",
+            "ai_decision": "TEXT",
+            "odds_home_water": "REAL",
+            "odds_away_water": "REAL",
         }
         for col, col_type in new_cols.items():
             if col not in columns:

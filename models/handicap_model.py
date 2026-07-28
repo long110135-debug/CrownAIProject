@@ -232,20 +232,14 @@ class HandicapModel(BaseModel):
         return "，".join(parts)
 
     def _handicap_diff(self, open_hdp: str, current_hdp: str) -> float:
-        """计算盘口变化幅度"""
-        return self._handicap_to_number(current_hdp) - self._handicap_to_number(open_hdp)
+        """计算盘口变化幅度(委托odds_math)"""
+        from utils.odds_math import handicap_to_number
+        return handicap_to_number(current_hdp) - handicap_to_number(open_hdp)
 
     def _handicap_to_number(self, handicap_str: str) -> float:
-        """盘口文字转数值"""
-        if not handicap_str:
-            return 0
-        val = 0
-        nums = re.findall(r'[\d.]+', str(handicap_str))
-        if nums:
-            val = float(nums[0])
-        if "客让" in str(handicap_str) or "受" in str(handicap_str):
-            val = -val
-        return val
+        """盘口文字转数值(委托odds_math唯一实现)"""
+        from utils.odds_math import handicap_to_number
+        return handicap_to_number(handicap_str)
 
     def _no_data_result(self) -> dict:
         """无盘口数据"""

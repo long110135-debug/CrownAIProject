@@ -56,10 +56,15 @@ def acquire_lock(task_name: str) -> bool:
             log.info(f"[锁] {task_name} 被占用 (PID={existing['pid']})，跳过")
             return False
 
-        # 检查互斥: track和analyze不能同时跑
-        mutex_map = {"track": "analyze", "analyze": "track"}
-        mutex_task = mutex_map.get(task_name)
-        if mutex_task:
+        # 检查互斥: 写同表的不能同时跑
+        # track写closing_odds+prediction_history(CLV), analyze写prediction_history, settle写两者
+        mutex_map = {
+            "track": {"analyze", "settle"},
+            "analyze": {"track", "settle"},
+            "settle": {"track", "analyze"},
+        }
+        mutex_tasks = mutex_map.get(task_name, set())
+        for mutex_task in mutex_tasks:
             cursor.execute("SELECT pid FROM task_locks WHERE task_name = ?",
                           (mutex_task,))
             if cursor.fetchone():
