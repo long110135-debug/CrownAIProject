@@ -72,6 +72,16 @@ def cmd_report():
     generate_reports()
 
 
+def cmd_observe(html: bool = False):
+    """观察期只读统计(不修改任何数据)"""
+    from pipeline.observation import collect_observation, print_observation, generate_observation_html
+    data = collect_observation()
+    print_observation(data)
+    if html:
+        path = generate_observation_html(data)
+        print(f"  HTML报表: {path}")
+
+
 # === Watchdog (含防重启风暴) ===
 
 WATCHDOG_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -226,8 +236,10 @@ if __name__ == "__main__":
         'report': cmd_report,
         'watchdog': cmd_watchdog,
     }
-    if cmd in commands:
+    if cmd == 'observe':
+        cmd_observe(html='--html' in sys.argv)
+    elif cmd in commands:
         commands[cmd]()
     else:
         print(f"未知命令: {cmd}")
-        print(f"可用: {', '.join(commands.keys())}")
+        print(f"可用: {', '.join(list(commands.keys()) + ['observe'])}")
