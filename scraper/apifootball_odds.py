@@ -273,8 +273,4 @@ def _format_handicap(val: float) -> str:
         return f"客让{abs(val)}"
 
 
-def _safe_float(val) -> float:
-    try:
-        return float(val) if val else 0.0
-    except (ValueError, TypeError):
-        return 0.0
+from utils.helpers import safe_float as _safe_float

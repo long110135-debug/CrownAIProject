@@ -419,26 +419,7 @@ def _resolve_fixture_id(client, match: dict, date_str: str):
     return None
 
 
-def _parse_time(time_str: str):
-    """解析比赛时间"""
-    import re
-    if not time_str:
-        return None
-    m = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})', time_str)
-    if m:
-        try:
-            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
-                          int(m.group(4)), int(m.group(5)))
-        except ValueError:
-            return None
-    m = re.match(r'(\d{1,2})月(\d{1,2})日\s+(\d{1,2}):(\d{2})', time_str)
-    if m:
-        try:
-            return datetime(datetime.now().year, int(m.group(1)), int(m.group(2)),
-                          int(m.group(3)), int(m.group(4)))
-        except ValueError:
-            return None
-    return None
+from utils.helpers import parse_match_time as _parse_time
 
 
 def _save_funnel(after_l1, after_l2, after_l3, a, b, c):

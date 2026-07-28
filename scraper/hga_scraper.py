@@ -598,10 +598,8 @@ class HGACrownScraper:
             return hdp_value
 
     def _safe_float(self, val) -> float:
-        try:
-            return float(val)
-        except (ValueError, TypeError):
-            return 0.0
+        from utils.helpers import safe_float
+        return safe_float(val)
 
     def close(self):
         """关闭会话"""

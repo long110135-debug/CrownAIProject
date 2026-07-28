@@ -413,10 +413,8 @@ class APIFootballClient:
             return utc_time
 
     def _safe_float(self, val) -> float:
-        try:
-            return float(val)
-        except (ValueError, TypeError):
-            return 0.0
+        from utils.helpers import safe_float
+        return safe_float(val)
 
     def _safe_avg(self, total, played) -> float:
         if not played:

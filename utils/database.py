@@ -1290,13 +1290,7 @@ def get_funnel_summary(days: int = 30) -> dict:
 
 # 委托到唯一实现(utils/odds_math.py)，不重复定义
 from utils.odds_math import handicap_to_number as _handicap_to_number
-
-
-def _safe_float(val) -> float:
-    try:
-        return float(val) if val else 0.0
-    except (ValueError, TypeError):
-        return 0.0
+from utils.helpers import safe_float as _safe_float
 
 
 # 初始化

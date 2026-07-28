@@ -340,36 +340,4 @@ def _compare_timeline_records(match_id: str, prev: dict, curr: dict) -> Optional
     }
 
 
-def _parse_match_time(time_str: str):
-    """解析比赛时间(支持多种格式)"""
-    import re
-    if not time_str:
-        return None
-
-    # 格式1: "08月21日 15:00"
-    m = re.match(r'(\d{1,2})月(\d{1,2})日\s+(\d{1,2}):(\d{2})', time_str)
-    if m:
-        try:
-            year = datetime.now().year
-            return datetime(year, int(m.group(1)), int(m.group(2)),
-                          int(m.group(3)), int(m.group(4)))
-        except ValueError:
-            return None
-
-    # 格式2: "2026-08-21 15:00"
-    m = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})', time_str)
-    if m:
-        try:
-            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
-                          int(m.group(4)), int(m.group(5)))
-        except ValueError:
-            return None
-
-    return None
-
-
-def _safe_float(val) -> float:
-    try:
-        return float(val) if val else 0.0
-    except (ValueError, TypeError):
-        return 0.0
+from utils.helpers import parse_match_time as _parse_match_time, safe_float as _safe_float
