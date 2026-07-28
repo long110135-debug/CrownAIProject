@@ -100,8 +100,9 @@ TEAM_NAME_MAP = {
     "维堡": "Viborg", "林比": "Lyngby", "瓦埃勒": "Vejle", "霍森斯": "Horsens",
 }
 
-# 皇冠联赛名 → API-Football联赛ID
+# 联赛名 → API-Football联赛ID (同时支持皇冠长名和API短名)
 LEAGUE_MAP = {
+    # 皇冠长名
     "英格兰超级联赛": 39, "英格兰冠军联赛": 40,
     "西班牙甲组联赛": 140, "西班牙乙组联赛": 141,
     "意大利甲组联赛": 135, "意大利乙组联赛": 136,
@@ -110,6 +111,20 @@ LEAGUE_MAP = {
     "荷兰甲组联赛": 88, "葡萄牙超级联赛": 94,
     "瑞典超级联赛": 113, "芬兰超级联赛": 244,
     "挪威超级联赛": 103, "丹麦超级联赛": 119,
+    # API-Football短名(matches表实际存储格式)
+    "英超": 39, "英冠": 40, "英甲": 41,
+    "西甲": 140, "西乙": 141,
+    "意甲": 135, "意乙": 136,
+    "德甲": 78, "德乙": 79,
+    "法甲": 61, "法乙": 62,
+    "荷甲": 88, "荷乙": 89,
+    "葡超": 94, "葡甲": 95,
+    "瑞超": 113, "芬超": 244, "挪超": 103, "丹超": 119,
+    "欧冠": 2, "欧联": 3, "欧协联": 848,
+    "阿甲": 128, "巴甲": 71, "解放者杯": 13,
+    "美职联": 253, "日职": 98, "日乙": 99, "韩K": 292,
+    "土超": 203, "俄超": 235, "比甲": 37, "苏超": 179,
+    "瑞士超": 170, "奥甲": 184, "澳超": 169,
 }
 
 # 当前赛季
@@ -169,18 +184,49 @@ def enrich_matches_with_stats(matches: list) -> list:
         
         standings = standings_cache[league_id]
         
-        home_en = TEAM_NAME_MAP.get(m.get('home', ''))
-        away_en = TEAM_NAME_MAP.get(m.get('away', ''))
+        home_name = m.get('home_team', '') or m.get('home', '')
+        away_name = m.get('away_team', '') or m.get('away', '')
         
-        if home_en and home_en in standings:
-            m['home_stats'] = _format_stats(standings[home_en])
+        home_stats = _match_team(home_name, standings)
+        away_stats = _match_team(away_name, standings)
+        
+        if home_stats:
+            m['home_stats'] = _format_stats(home_stats)
             enriched += 1
-        if away_en and away_en in standings:
-            m['away_stats'] = _format_stats(standings[away_en])
+        if away_stats:
+            m['away_stats'] = _format_stats(away_stats)
             enriched += 1
     
     log.info(f"[充实] 完成: {enriched}个球队数据已匹配")
     return matches
+
+
+def _match_team(name: str, standings: dict):
+    """
+    匹配球队名到积分榜数据。
+    尝试顺序:
+    1. 直接用名字匹配(已经是英文名)
+    2. 中文→英文映射后匹配
+    3. 模糊匹配(名字包含关系)
+    """
+    if not name:
+        return None
+    
+    # 1. 直接匹配
+    if name in standings:
+        return standings[name]
+    
+    # 2. 中文→英文映射
+    en_name = TEAM_NAME_MAP.get(name)
+    if en_name and en_name in standings:
+        return standings[en_name]
+    
+    # 3. 模糊匹配(名字包含)
+    for team_key, stats in standings.items():
+        if name.lower() in team_key.lower() or team_key.lower() in name.lower():
+            return stats
+    
+    return None
 
 
 def _format_stats(raw: dict) -> dict:
