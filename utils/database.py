@@ -403,6 +403,9 @@ def init_db():
     # === 迁移: 临场二次分析字段 ===
     _migrate_prematch_columns(cursor, conn)
 
+    # === 迁移: 盘口序列身份字段(固定盘口源) ===
+    _migrate_odds_series_columns(cursor, conn)
+
     conn.close()
 
 
@@ -465,6 +468,33 @@ def _migrate_prematch_columns(cursor, conn):
             if col not in exp_cols:
                 cursor.execute(f"ALTER TABLE recommendation_experiments ADD COLUMN {col} {col_type}")
 
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _migrate_odds_series_columns(cursor, conn):
+    """为odds_timeline添加盘口序列身份字段(固定盘口源，可重复执行)"""
+    try:
+        cursor.execute("PRAGMA table_info(odds_timeline)")
+        cols = [row[1] for row in cursor.fetchall()]
+        series_cols = {
+            "fixture_id": "TEXT",
+            "bookmaker": "TEXT",
+            "market_type": "TEXT DEFAULT 'asian_handicap'",
+            "handicap_raw": "TEXT",
+            "home_price_raw": "REAL",
+            "away_price_raw": "REAL",
+            "odds_format": "TEXT",
+            "home_water_normalized": "REAL",
+            "away_water_normalized": "REAL",
+            "captured_at_utc": "TEXT",
+            "is_primary_series": "INTEGER DEFAULT 0",
+            "series_key": "TEXT",
+        }
+        for col, col_type in series_cols.items():
+            if col not in cols:
+                cursor.execute(f"ALTER TABLE odds_timeline ADD COLUMN {col} {col_type}")
         conn.commit()
     except Exception:
         pass
@@ -607,14 +637,17 @@ def save_analysis(match_id: str, result: dict):
 
 
 def get_today_matches(date_str: Optional[str] = None) -> List[dict]:
-    """获取今日比赛"""
+    """获取某北京时间日的比赛(match_time按UTC ISO存储，用UTC范围查询)"""
+    from utils.timeutil import shanghai_day_to_utc_range, today_utc_range
     if not date_str:
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        utc_start, utc_end = today_utc_range()
+    else:
+        utc_start, utc_end = shanghai_day_to_utc_range(date_str)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT * FROM matches WHERE match_time LIKE ? ORDER BY match_time
-    """, (f"{date_str}%",))
+        SELECT * FROM matches WHERE match_time >= ? AND match_time <= ? ORDER BY match_time
+    """, (utc_start, utc_end))
     rows = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return rows
@@ -664,6 +697,7 @@ def save_prediction(record: dict):
     (result/result_score/hit/error_reason/settled_at/clv_*/closing_*)。
     防止重复analyze摧毁已结算数据。
     """
+    from utils.timeutil import utc_iso
     conn = get_connection()
     try:
         cursor = conn.cursor()
@@ -716,7 +750,7 @@ def save_prediction(record: dict):
             record.get("recommend"),
             record.get("level"),
             record.get("confidence"),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            utc_iso(),
             record.get("model_version", ""),
             json.dumps(record.get("model_weights", {}), ensure_ascii=False),
             record.get("ai_decision", ""),
@@ -763,32 +797,47 @@ def get_unsettled_predictions() -> List[dict]:
 
 def get_hit_stats(level: str = None, limit: int = 100) -> dict:
     """
-    获取命中率统计
-    返回: {total, hit, miss, hit_rate, by_level: {A: {...}, B: {...}, C: {...}}}
+    获取命中率统计。
+    命中率分母 = 已决出胜负的投注(hit IN (0,1))，排除 push/no_bet/invalid(hit=2)。
+    返回: {total, hit, miss, hit_rate, push_count, no_bet_count, invalid_count,
+           by_level: {A: {...}, B: {...}, C: {...}}}
     """
     conn = get_connection()
     cursor = conn.cursor()
 
-    where = "WHERE hit >= 0"
-    params = []
-    if level:
-        where += " AND level = ?"
-        params.append(level)
+    level_clause = " AND level = ?" if level else ""
+    params = [level] if level else []
 
+    # 命中率: 仅统计已决出胜负的投注 hit IN (0,1)
     cursor.execute(f"""
         SELECT level, COUNT(*) as total,
                SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) as hit_count,
                SUM(CASE WHEN hit = 0 THEN 1 ELSE 0 END) as miss_count
-        FROM prediction_history {where}
+        FROM prediction_history
+        WHERE hit IN (0, 1){level_clause}
         GROUP BY level
         ORDER BY level
         LIMIT ?
     """, params + [limit])
 
     rows = [dict(row) for row in cursor.fetchall()]
+
+    # push/no_bet/invalid 单独计数(hit=2, 不参与命中率但push计入投注额)
+    cursor.execute(f"""
+        SELECT
+            SUM(CASE WHEN hit_result = 'push' THEN 1 ELSE 0 END) as push_count,
+            SUM(CASE WHEN hit_result = 'no_bet' THEN 1 ELSE 0 END) as no_bet_count,
+            SUM(CASE WHEN hit_result = 'invalid' THEN 1 ELSE 0 END) as invalid_count
+        FROM prediction_history
+        WHERE hit = 2{level_clause}
+    """, params)
+    excl = cursor.fetchone()
     conn.close()
 
-    stats = {"total": 0, "hit": 0, "miss": 0, "hit_rate": 0, "by_level": {}}
+    stats = {"total": 0, "hit": 0, "miss": 0, "hit_rate": 0, "by_level": {},
+             "push_count": excl["push_count"] or 0,
+             "no_bet_count": excl["no_bet_count"] or 0,
+             "invalid_count": excl["invalid_count"] or 0}
     for row in rows:
         lv = row["level"] or "?"
         total = row["total"]
@@ -804,6 +853,49 @@ def get_hit_stats(level: str = None, limit: int = 100) -> dict:
         stats["hit_rate"] = round(stats["hit"] / stats["total"] * 100, 1)
 
     return stats
+
+
+def get_recommendation_pnl(level: str = None) -> dict:
+    """
+    主推荐收益/ROI(基于hit_result详细字符串, 唯一精确收益来源)。
+
+    规则:
+    - 收益按 hit_to_pnl: win+1/half_win+0.5/push0/half_loss-0.5/loss-1
+    - 投注额分母 = 有pnl的投注(win/half_win/push/half_loss/loss), 排除no_bet/invalid
+    - push计入分母(利润0), invalid/no_bet不计入
+    - half_win不得按+1, half_loss不得按-1
+    """
+    from utils.odds_math import hit_to_pnl
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    level_clause = " AND level = ?" if level else ""
+    params = [level] if level else []
+
+    cursor.execute(f"""
+        SELECT hit_result FROM prediction_history
+        WHERE hit_result IS NOT NULL AND hit_result != ''{level_clause}
+    """, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    total_pnl = 0.0
+    bet_count = 0  # 投注额分母(含push, 排除no_bet/invalid)
+    dist = {}
+    for row in rows:
+        hr = row["hit_result"]
+        dist[hr] = dist.get(hr, 0) + 1
+        pnl = hit_to_pnl(hr)
+        if pnl is not None:  # no_bet/invalid 为 None, 不计入投注额
+            total_pnl += pnl
+            bet_count += 1
+
+    return {
+        "total_pnl": round(total_pnl, 3),
+        "bet_count": bet_count,
+        "roi": round(total_pnl / bet_count * 100, 1) if bet_count > 0 else None,
+        "distribution": dist,
+    }
 
 
 def get_recent_predictions(days: int = 7, level: str = None) -> List[dict]:
@@ -826,6 +918,24 @@ def get_recent_predictions(days: int = 7, level: str = None) -> List[dict]:
 
 # === v2.0: 盘口时间线 ===
 
+def _extract_bookmaker(source: str) -> str:
+    """从source字符串提取bookmaker名称。
+    'api-football(Bet365)'→'Bet365', 'crown_daemon'/'crown_playwright'→'Crown',
+    'api_football'→'unknown'。
+    """
+    import re
+    if not source:
+        return "unknown"
+    m = re.match(r"api-football\((.+)\)", source)
+    if m:
+        return m.group(1)
+    if source.startswith("crown"):
+        return "Crown"
+    if source == "api_football":
+        return "unknown"
+    return source
+
+
 def save_timeline_record(match_id: str, odds_data: dict, phase: str = "early", source: str = "crown"):
     """
     保存一条盘口时间线记录(带并发写重试)
@@ -838,7 +948,11 @@ def save_timeline_record(match_id: str, odds_data: dict, phase: str = "early", s
         conn = get_connection()
         try:
             cursor = conn.cursor()
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # UTC ISO 8601 时间戳(统一存储格式)
+            from datetime import timezone
+            from utils.timeutil import utc_iso
+            captured_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            now = captured_utc  # record_time 统一UTC ISO
 
             # 判断是否是该比赛的首条记录(初盘)
             cursor.execute("SELECT COUNT(*) FROM odds_timeline WHERE match_id = ?", (match_id,))
@@ -850,12 +964,31 @@ def save_timeline_record(match_id: str, odds_data: dict, phase: str = "early", s
             handicap_str = odds_data.get("handicap", "")
             handicap_value = _handicap_to_number(handicap_str)
 
+            # 盘口序列身份: bookmaker/market_type/series_key/is_primary_series
+            from pipeline.odds_series import make_series_key, get_primary_bookmaker
+            bookmaker = odds_data.get("bookmaker") or _extract_bookmaker(source)
+            market_type = odds_data.get("market_type", "asian_handicap")
+            series_key = make_series_key(match_id, bookmaker, market_type, handicap_value)
+            primary = get_primary_bookmaker(match_id)
+            effective_primary = primary or bookmaker
+            is_primary_series = 1 if bookmaker == effective_primary else 0
+
+            # 赔率格式与归一化水位
+            odds_format = odds_data.get("odds_format", "hk")  # crown源默认hk
+            home_norm = odds_data.get("home_water_normalized", odds_data.get("home_water"))
+            away_norm = odds_data.get("away_water_normalized", odds_data.get("away_water"))
+
             cursor.execute("""
                 INSERT INTO odds_timeline
                 (match_id, phase, record_time, handicap, handicap_value,
                  home_water, away_water, over_line, over_water, under_water,
-                 home_win, draw, away_win, source, is_first, is_closing)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 home_win, draw, away_win, source, is_first, is_closing,
+                 fixture_id, bookmaker, market_type, handicap_raw,
+                 home_price_raw, away_price_raw, odds_format,
+                 home_water_normalized, away_water_normalized,
+                 captured_at_utc, is_primary_series, series_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 match_id, actual_phase, now,
                 handicap_str, handicap_value,
@@ -869,6 +1002,15 @@ def save_timeline_record(match_id: str, odds_data: dict, phase: str = "early", s
                 _safe_float(odds_data.get("away_win")),
                 source, is_first,
                 1 if actual_phase == "closing" else 0,
+                odds_data.get("fixture_id", ""),
+                bookmaker, market_type,
+                odds_data.get("handicap_raw", handicap_str),
+                _safe_float(odds_data.get("home_price_raw")),
+                _safe_float(odds_data.get("away_price_raw")),
+                odds_format,
+                _safe_float(home_norm),
+                _safe_float(away_norm),
+                captured_utc, is_primary_series, series_key,
             ))
             conn.commit()
         except Exception:
@@ -928,7 +1070,8 @@ def save_closing_odds(match_id: str, odds_data: dict, source: str = "crown"):
     """
     conn = get_connection()
     cursor = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    from utils.timeutil import utc_iso
+    now = utc_iso()  # closing_time 统一UTC ISO
     handicap_str = odds_data.get("handicap", "")
     handicap_value = _handicap_to_number(handicap_str)
 
@@ -1106,8 +1249,8 @@ def get_performance_summary(days: int = 30) -> dict:
     cursor.execute("""
         SELECT COUNT(*) as total,
                SUM(CASE WHEN hit >= 0 THEN 1 ELSE 0 END) as settled,
+               SUM(CASE WHEN hit IN (0, 1) THEN 1 ELSE 0 END) as decided,
                SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) as hit_count,
-               AVG(CASE WHEN hit >= 0 THEN hit * 1.0 ELSE NULL END) as hit_rate,
                AVG(clv_handicap) as avg_clv_hdp,
                AVG(clv_water) as avg_clv_water,
                AVG(crown_index) as avg_index,
@@ -1121,7 +1264,8 @@ def get_performance_summary(days: int = 30) -> dict:
     cursor.execute("""
         SELECT level, COUNT(*) as total,
                SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) as hit_count,
-               SUM(CASE WHEN hit >= 0 THEN 1 ELSE 0 END) as settled
+               SUM(CASE WHEN hit >= 0 THEN 1 ELSE 0 END) as settled,
+               SUM(CASE WHEN hit IN (0, 1) THEN 1 ELSE 0 END) as decided
         FROM prediction_history
         WHERE predicted_at >= datetime('now', 'localtime', ?)
         GROUP BY level
@@ -1130,19 +1274,20 @@ def get_performance_summary(days: int = 30) -> dict:
     for r in cursor.fetchall():
         r = dict(r)
         lv = r["level"] or "未分级"
-        settled = r["settled"] or 0
+        decided = r["decided"] or 0
         hit = r["hit_count"] or 0
         by_level[lv] = {
             "total": r["total"],
-            "settled": settled,
+            "settled": r["settled"] or 0,
             "hit": hit,
-            "hit_rate": round(hit / settled * 100, 1) if settled > 0 else 0,
+            "hit_rate": round(hit / decided * 100, 1) if decided > 0 else 0,
         }
 
     conn.close()
 
     total = row["total"] or 0
     settled = row["settled"] or 0
+    decided = row["decided"] or 0
     hit_count = row["hit_count"] or 0
 
     return {
@@ -1150,7 +1295,7 @@ def get_performance_summary(days: int = 30) -> dict:
         "total_matches": total,
         "total_settled": settled,
         "hit_count": hit_count,
-        "hit_rate": round(hit_count / settled * 100, 1) if settled > 0 else 0,
+        "hit_rate": round(hit_count / decided * 100, 1) if decided > 0 else 0,
         "avg_clv_handicap": round(row["avg_clv_hdp"], 4) if row["avg_clv_hdp"] else None,
         "avg_clv_water": round(row["avg_clv_water"], 4) if row["avg_clv_water"] else None,
         "avg_crown_index": round(row["avg_index"], 1) if row["avg_index"] else 0,

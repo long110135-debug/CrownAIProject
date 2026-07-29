@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from utils.timeutil import now_utc, today_shanghai
+
 
 class TestDailyRunIntegration(unittest.TestCase):
     """使用临时DB + mock网络，验证完整流水线"""
@@ -30,7 +32,7 @@ class TestDailyRunIntegration(unittest.TestCase):
     def _seed_match(self, match_id="CROWN_英超_阿森纳_切尔西_2026-07-28",
                     league="英超", home="阿森纳", away="切尔西", hours_ahead=3):
         """写入一场待分析比赛+盘口时间线"""
-        kickoff = (datetime.now() + timedelta(hours=hours_ahead)).strftime("%Y-%m-%d %H:%M")
+        kickoff = (now_utc() + timedelta(hours=hours_ahead)).strftime("%Y-%m-%d %H:%M")
         self.db_mod.save_match({
             "match_id": match_id, "league": league, "league_tier": 1,
             "home_team": home, "away_team": away,
@@ -69,7 +71,7 @@ class TestDailyRunIntegration(unittest.TestCase):
 
         conn = self.db_mod.get_connection()
         cursor = conn.cursor()
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = today_shanghai()
         cursor.execute("SELECT COUNT(*) FROM filter_funnel WHERE log_date = ?", (today,))
         self.assertGreaterEqual(cursor.fetchone()[0], 1)
         conn.close()
@@ -92,7 +94,7 @@ class TestDailyRunIntegration(unittest.TestCase):
     def test_l2_rejects_no_timeline(self):
         """无时间线的比赛被L2过滤"""
         from pipeline.daily_run import analyze_matches
-        kickoff = (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
+        kickoff = (now_utc() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
         self.db_mod.save_match({
             "match_id": "CROWN_英超_无盘口_队_2026-07-28", "league": "英超", "league_tier": 1,
             "home_team": "无盘口", "away_team": "队",
@@ -143,7 +145,7 @@ class TestDailyRunIntegration(unittest.TestCase):
         from pipeline.daily_run import track_odds
 
         # 先seed一场pending比赛
-        kickoff = (datetime.now() + timedelta(hours=4)).strftime("%Y-%m-%d %H:%M")
+        kickoff = (now_utc() + timedelta(hours=4)).strftime("%Y-%m-%d %H:%M")
         self.db_mod.save_match({
             "match_id": "CROWN_英超_测试1_测试2_2026-07-28", "league": "英超", "league_tier": 1,
             "home_team": "测试1", "away_team": "测试2",

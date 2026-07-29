@@ -56,10 +56,12 @@ def print_dashboard():
     # 最近7天明细
     recent = get_recent_predictions(days=7)
     settled = [r for r in recent if r['hit'] >= 0]
+    decided = [r for r in settled if r['hit'] in (0, 1)]
     if settled:
-        print(f"\n  最近7天已结算: {len(settled)}场")
-        hits = sum(1 for r in settled if r['hit'] == 1)
-        print(f"  命中: {hits}/{len(settled)} ({hits/len(settled)*100:.1f}%)")
+        print(f"\n  最近7天已结算: {len(settled)}场 (已决胜负{len(decided)})")
+        hits = sum(1 for r in decided if r['hit'] == 1)
+        hr = f"{hits/len(decided)*100:.1f}%" if decided else "N/A"
+        print(f"  命中: {hits}/{len(decided)} ({hr})")
 
     print()
 
@@ -75,8 +77,12 @@ def generate_dashboard_html():
 
     rows_html = ""
     for r in settled[:50]:
-        hit_icon = "✓" if r['hit'] == 1 else "✗"
-        hit_color = "#4ade80" if r['hit'] == 1 else "#f87171"
+        hr = r.get('hit_result') or ''
+        hit_icon = {"win": "✓", "half_win": "✓", "loss": "✗", "half_loss": "✗",
+                    "push": "◐", "no_bet": "·", "invalid": "·"}.get(hr, "✓" if r['hit'] == 1 else "✗")
+        hit_color = {"win": "#4ade80", "half_win": "#4ade80", "loss": "#f87171",
+                     "half_loss": "#f87171", "push": "#facc15"}.get(hr,
+                     "#4ade80" if r['hit'] == 1 else "#f87171")
         level_color = {"A": "#f0c27f", "B": "#6c9ce8", "C": "#666"}.get(r['level'], "#666")
         rows_html += f"""
         <tr>

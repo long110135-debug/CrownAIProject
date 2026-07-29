@@ -55,6 +55,7 @@ def _collect_clv_stats() -> dict:
         SELECT level,
                COUNT(*) as total,
                SUM(CASE WHEN hit >= 0 THEN 1 ELSE 0 END) as settled,
+               SUM(CASE WHEN hit IN (0, 1) THEN 1 ELSE 0 END) as decided,
                SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) as hit_count,
                AVG(CASE WHEN clv_handicap IS NOT NULL THEN clv_handicap END) as avg_clv,
                SUM(CASE WHEN clv_handicap > 0 THEN 1 ELSE 0 END) as pos_clv,
@@ -69,6 +70,7 @@ def _collect_clv_stats() -> dict:
         SELECT league,
                COUNT(*) as total,
                SUM(CASE WHEN hit >= 0 THEN 1 ELSE 0 END) as settled,
+               SUM(CASE WHEN hit IN (0, 1) THEN 1 ELSE 0 END) as decided,
                SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) as hit_count,
                AVG(CASE WHEN clv_handicap IS NOT NULL THEN clv_handicap END) as avg_clv
         FROM prediction_history
@@ -81,7 +83,8 @@ def _collect_clv_stats() -> dict:
         SELECT strftime('%Y-W%W', predicted_at) as week,
                COUNT(*) as total,
                AVG(CASE WHEN clv_handicap IS NOT NULL THEN clv_handicap END) as avg_clv,
-               AVG(CASE WHEN hit >= 0 THEN hit * 1.0 END) as hit_rate
+               SUM(CASE WHEN hit IN (0, 1) THEN 1 ELSE 0 END) as decided,
+               SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) as hit_count
         FROM prediction_history
         GROUP BY week ORDER BY week DESC LIMIT 12
     """)
@@ -112,8 +115,9 @@ def _build_html(stats: dict) -> str:
     for lv in stats['by_level']:
         name = lv['level'] or '未分级'
         settled = lv['settled'] or 0
+        decided = lv['decided'] or 0
         hit = lv['hit_count'] or 0
-        hr = round(hit / settled * 100, 1) if settled else 0
+        hr = round(hit / decided * 100, 1) if decided else 0
         clv = lv['avg_clv']
         clv_str = f"{clv:+.3f}" if clv is not None else "-"
         clv_class = "positive" if clv and clv > 0 else "negative" if clv and clv < 0 else ""
@@ -130,8 +134,9 @@ def _build_html(stats: dict) -> str:
     league_rows = ""
     for lg in stats['by_league']:
         settled = lg['settled'] or 0
+        decided = lg['decided'] or 0
         hit = lg['hit_count'] or 0
-        hr = round(hit / settled * 100, 1) if settled else 0
+        hr = round(hit / decided * 100, 1) if decided else 0
         clv = lg['avg_clv']
         clv_str = f"{clv:+.3f}" if clv is not None else "-"
         clv_class = "positive" if clv and clv > 0 else "negative" if clv and clv < 0 else ""

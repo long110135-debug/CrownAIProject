@@ -6,6 +6,8 @@ import re
 from datetime import datetime
 from typing import Optional
 
+from utils.timeutil import UTC, SHANGHAI
+
 
 def safe_float(val) -> float:
     """安全转换为浮点数，None/空/异常均返回0.0"""
@@ -22,7 +24,7 @@ def infer_year(month: int, reference_date: Optional[datetime] = None) -> int:
     - 目标月份比当前月份大超过6个月 → 上一年
     - 否则使用当前年
     """
-    now = reference_date or datetime.now()
+    now = reference_date or datetime.now(UTC)
     current_month = now.month
     current_year = now.year
 
@@ -65,30 +67,43 @@ def normalize_date(date_str: str, reference_date: Optional[datetime] = None) -> 
 
 def parse_match_time(time_str: str, reference_date: Optional[datetime] = None) -> Optional[datetime]:
     """
-    解析比赛时间(支持多种格式)
-    - "2026-07-20 17:00" → datetime
-    - "07月20日 17:00" → datetime(使用半年边界规则推断年份)
+    解析比赛时间 → timezone-aware datetime(统一返回aware)。
+    - ISO 8601带时区 "2026-07-29T05:30:00+00:00" → 按原时区解析
+    - naive ISO "2026-07-20 17:00" → 视为UTC(迁移后的标准存储)
+    - 中文 "07月20日 17:00" → 视为Asia/Shanghai北京时间(推断年份)
     - None/空/无法解析 → None
     """
     if not time_str:
         return None
+    s = str(time_str).strip()
 
-    # 格式1: "2026-07-20 17:00"
-    m = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})', time_str)
-    if m:
+    # 格式0: ISO 8601 带时区 (含T和+HH:MM/Z)
+    if "T" in s and (s.endswith("Z") or re.search(r"[+-]\d{2}:\d{2}$", s)):
         try:
-            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
-                          int(m.group(4)), int(m.group(5)))
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+        except ValueError:
+            pass
+
+    # 格式1: naive ISO "2026-07-20 17:00[:SS]" → 视为UTC
+    m = re.match(r'(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?', s)
+    if m:
+        g = m.groups()
+        sec = int(g[5]) if g[5] else 0
+        try:
+            return datetime(int(g[0]), int(g[1]), int(g[2]),
+                            int(g[3]), int(g[4]), sec, tzinfo=UTC)
         except ValueError:
             return None
 
-    # 格式2: "07月20日 17:00"
-    m = re.match(r'(\d{1,2})月(\d{1,2})日\s+(\d{1,2}):(\d{2})', time_str)
+    # 格式2: 中文 "07月20日 17:00" → 北京时间
+    m = re.match(r'(\d{1,2})月(\d{1,2})日\s+(\d{1,2}):(\d{2})', s)
     if m:
         month, day = int(m.group(1)), int(m.group(2))
         year = infer_year(month, reference_date)
         try:
-            return datetime(year, month, day, int(m.group(3)), int(m.group(4)))
+            return datetime(year, month, day, int(m.group(3)), int(m.group(4)),
+                            tzinfo=SHANGHAI)
         except ValueError:
             return None
 

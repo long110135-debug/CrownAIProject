@@ -133,10 +133,12 @@ def cmd_watchdog():
         issues.append(f"皇冠账号: {e}")
 
     # 4. 今日赛事是否已抓取
-    today = datetime.now().strftime('%Y-%m-%d')
+    from utils.timeutil import today_utc_range
+    utc_start, utc_end = today_utc_range()
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM matches WHERE match_time LIKE ?", (f"{today}%",))
+    cursor.execute("SELECT COUNT(*) FROM matches WHERE match_time >= ? AND match_time <= ?",
+                   (utc_start, utc_end))
     today_count = cursor.fetchone()[0]
     conn.close()
     if today_count == 0 and datetime.now().hour >= 8:

@@ -77,6 +77,7 @@ def auto_settle(target_date: str = None, settle_all: bool = False):
 
     settled_count = 0
     hit_count = 0
+    decided_count = 0  # 已决胜负(hit IN 0,1)，命中率分母，排除push/no_bet/invalid
     results_summary = []
 
     for pred in target_preds:
@@ -144,23 +145,27 @@ def auto_settle(target_date: str = None, settle_all: bool = False):
         _settle_shadow_experiment(pred, home_goals, away_goals)
 
         settled_count += 1
+        if hit in (0, 1):
+            decided_count += 1
         if hit == 1:
             hit_count += 1
 
-        icon = "✓" if hit == 1 else "✗"
-        print(f"  {icon} {home_cn} {score_str} {away_cn} | 推荐:{recommend} 实际:{winner}")
+        icon = {"win": "✓", "half_win": "✓", "loss": "✗", "half_loss": "✗",
+                "push": "◐", "no_bet": "·", "invalid": "·"}.get(hit_result, "?")
+        print(f"  {icon} {home_cn} {score_str} {away_cn} | 推荐:{recommend} 实际:{winner} [{hit_result}]")
         if error_reason:
             print(f"    错因: {error_reason}")
 
         results_summary.append({
-            "match_id": pred['match_id'], "hit": hit,
+            "match_id": pred['match_id'], "hit": hit, "hit_result": hit_result,
             "home": home_cn, "away": away_cn, "score": score_str,
         })
 
     # 汇总
     print(f"\n  {'─'*44}")
     if settled_count > 0:
-        print(f"  结算: {settled_count}场 | 命中: {hit_count} | 命中率: {hit_count/settled_count*100:.1f}%")
+        hr = f"{hit_count/decided_count*100:.1f}%" if decided_count > 0 else "N/A"
+        print(f"  结算: {settled_count}场 | 已决胜负: {decided_count} | 命中: {hit_count} | 命中率: {hr}")
     else:
         print("  未找到匹配赛果。")
 

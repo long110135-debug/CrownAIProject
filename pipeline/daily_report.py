@@ -55,6 +55,7 @@ def _collect_daily_data(date_str: str) -> Optional[dict]:
     # 当日结算统计
     cursor.execute("""
         SELECT COUNT(*) as settled,
+               SUM(CASE WHEN hit IN (0, 1) THEN 1 ELSE 0 END) as decided,
                SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) as hit_count,
                AVG(CASE WHEN clv_handicap IS NOT NULL THEN clv_handicap END) as avg_clv
         FROM prediction_history WHERE settled_at LIKE ?
@@ -65,6 +66,7 @@ def _collect_daily_data(date_str: str) -> Optional[dict]:
     cursor.execute("""
         SELECT level, COUNT(*) as total,
                SUM(CASE WHEN hit >= 0 THEN 1 ELSE 0 END) as settled,
+               SUM(CASE WHEN hit IN (0, 1) THEN 1 ELSE 0 END) as decided,
                SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) as hit_count
         FROM prediction_history WHERE predicted_at LIKE ?
         GROUP BY level
@@ -88,6 +90,7 @@ def _collect_daily_data(date_str: str) -> Optional[dict]:
         return None
 
     settled = settle_stats['settled'] or 0
+    decided = settle_stats['decided'] or 0
     hit = settle_stats['hit_count'] or 0
 
     return {
@@ -97,8 +100,8 @@ def _collect_daily_data(date_str: str) -> Optional[dict]:
         "avg_completeness": round(today_stats['avg_comp'], 1) if today_stats['avg_comp'] else 0,
         "settled": settled,
         "hit": hit,
-        "miss": settled - hit,
-        "hit_rate": round(hit / settled * 100, 1) if settled > 0 else None,
+        "miss": decided - hit,
+        "hit_rate": round(hit / decided * 100, 1) if decided > 0 else None,
         "avg_clv": settle_stats['avg_clv'],
         "by_level": by_level,
         "contribution": contribution,
@@ -118,8 +121,9 @@ def _build_report_html(data: dict, date_str: str) -> str:
             continue
         name = lv if lv != '?' else '未分级'
         settled = info['settled'] or 0
+        decided = info['decided'] or 0
         hit = info['hit_count'] or 0
-        hr = f"{hit/settled*100:.0f}%" if settled > 0 else "-"
+        hr = f"{hit/decided*100:.0f}%" if decided > 0 else "-"
         level_rows += f"<tr><td><strong>{name}</strong></td><td>{info['total']}</td><td>{settled}</td><td>{hit}</td><td>{hr}</td></tr>"
 
     # 模型贡献

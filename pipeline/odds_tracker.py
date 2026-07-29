@@ -138,7 +138,8 @@ def lock_closing_odds(hours_before_kickoff: float = 1.0):
     """
     conn = get_connection()
     cursor = conn.cursor()
-    now = datetime.now()
+    from utils.timeutil import now_utc
+    now = now_utc()
 
     # 获取所有pending状态的比赛
     cursor.execute("SELECT match_id, match_time FROM matches WHERE status = 'pending'")

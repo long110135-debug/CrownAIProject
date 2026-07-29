@@ -122,8 +122,9 @@ def save_api_odds(match_id: str, odds: dict, source: str = "api-football") -> bo
 
     参数:
         match_id: 标准match_id
-        odds: {handicap, home_water, away_water, over_line, over_water, under_water}
-        source: 来源标记
+        odds: {handicap, home_water, away_water, over_line, over_water, under_water,
+               bookmaker(可选), fixture_id(可选)}
+        source: 来源标记(如 "api-football(Bet365)")
 
     返回: 是否写入成功
     """
@@ -133,11 +134,30 @@ def save_api_odds(match_id: str, odds: dict, source: str = "api-football") -> bo
     # API-Football返回欧洲盘十进制赔率，统一转换为亚洲盘水位(HK)后入库，
     # 与crown_daemon源格式一致(模型阈值按亚洲盘水位校准)。
     from utils.odds_math import decimal_to_hk_water
+    import re
+
+    # 从source提取bookmaker: "api-football(Bet365)" → "Bet365"
+    bookmaker = odds.get("bookmaker")
+    if not bookmaker:
+        m = re.match(r"api-football\((.+)\)", source)
+        bookmaker = m.group(1) if m else "unknown"
+
+    raw_hw = odds.get("home_water", 0.95)
+    raw_aw = odds.get("away_water", 0.95)
 
     save_timeline_record(match_id, {
         "handicap": odds["handicap"],
-        "home_water": decimal_to_hk_water(odds.get("home_water", 0.95)),
-        "away_water": decimal_to_hk_water(odds.get("away_water", 0.95)),
+        "handicap_raw": odds["handicap"],
+        "home_water": decimal_to_hk_water(raw_hw),
+        "away_water": decimal_to_hk_water(raw_aw),
+        "home_water_normalized": decimal_to_hk_water(raw_hw),
+        "away_water_normalized": decimal_to_hk_water(raw_aw),
+        "home_price_raw": raw_hw,
+        "away_price_raw": raw_aw,
+        "odds_format": "decimal",
+        "bookmaker": bookmaker,
+        "market_type": "asian_handicap",
+        "fixture_id": odds.get("fixture_id", ""),
         "over_line": odds.get("over_line", ""),
         "over_water": decimal_to_hk_water(odds.get("over_water", 0)),
         "under_water": decimal_to_hk_water(odds.get("under_water", 0)),

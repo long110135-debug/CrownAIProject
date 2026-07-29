@@ -6,6 +6,8 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from utils.timeutil import now_utc
+
 
 class TestDailyRunEndToEnd(unittest.TestCase):
     """端到端流程测试(不依赖外部API，验证内部编排逻辑)"""
@@ -39,7 +41,7 @@ class TestDailyRunEndToEnd(unittest.TestCase):
         from datetime import datetime, timedelta
 
         # 写入一场6小时内开赛的比赛
-        kickoff = (datetime.now() + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+        kickoff = (now_utc() + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
         match_id = "CROWN_英超_阿森纳_切尔西_2026-07-28"
         db_mod.save_match({
             "match_id": match_id, "league": "英超", "league_tier": 1,
@@ -65,7 +67,7 @@ class TestDailyRunEndToEnd(unittest.TestCase):
         from pipeline.daily_run import analyze_matches
         from datetime import datetime, timedelta
 
-        kickoff = (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
+        kickoff = (now_utc() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
         db_mod.save_match({
             "match_id": "CROWN_英超_无盘口_队_2026-07-28", "league": "英超", "league_tier": 1,
             "home_team": "无盘口", "away_team": "队",
@@ -83,7 +85,7 @@ class TestDailyRunEndToEnd(unittest.TestCase):
         from pipeline.daily_run import analyze_matches
         from datetime import datetime, timedelta
 
-        kickoff = (datetime.now() + timedelta(hours=4)).strftime("%Y-%m-%d %H:%M")
+        kickoff = (now_utc() + timedelta(hours=4)).strftime("%Y-%m-%d %H:%M")
         match_id = "CROWN_西甲_巴萨_皇马_2026-07-28"
         db_mod.save_match({
             "match_id": match_id, "league": "西甲", "league_tier": 1,
@@ -112,7 +114,7 @@ class TestDailyRunEndToEnd(unittest.TestCase):
         from pipeline.daily_run import analyze_matches
         from datetime import datetime, timedelta
 
-        kickoff = (datetime.now() + timedelta(hours=5)).strftime("%Y-%m-%d %H:%M")
+        kickoff = (now_utc() + timedelta(hours=5)).strftime("%Y-%m-%d %H:%M")
         db_mod.save_match({
             "match_id": "CROWN_德甲_拜仁_多特_2026-07-28", "league": "德甲", "league_tier": 1,
             "home_team": "拜仁", "away_team": "多特",
@@ -127,9 +129,10 @@ class TestDailyRunEndToEnd(unittest.TestCase):
 
         analyze_matches(hours_ahead=6)
 
+        from utils.timeutil import today_shanghai
         conn = db_mod.get_connection()
         cursor = conn.cursor()
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = today_shanghai()
         cursor.execute("SELECT COUNT(*) FROM filter_funnel WHERE log_date = ?", (today,))
         count = cursor.fetchone()[0]
         conn.close()

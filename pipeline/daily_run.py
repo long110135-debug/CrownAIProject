@@ -94,13 +94,14 @@ def track_odds() -> int:
         log.warning("[track] API-Football不可用")
         return 0
 
-    today = datetime.now().strftime('%Y-%m-%d')
+    from utils.timeutil import today_utc_range
+    utc_start, utc_end = today_utc_range()
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT match_id, home_team, away_team, league FROM matches
-        WHERE status = 'pending' AND match_time LIKE ?
-    """, (f"{today}%",))
+        WHERE status = 'pending' AND match_time >= ? AND match_time <= ?
+    """, (utc_start, utc_end))
     pending = [dict(r) for r in cursor.fetchall()]
     conn.close()
 
@@ -109,7 +110,9 @@ def track_odds() -> int:
 
     odds_count = 0
     for m in pending:
-        fixture_id = _resolve_fixture_id(client, m, today)
+        # 用比赛自身UTC日期查询fixture(match_time为UTC ISO, 前10字符=UTC日期)
+        match_date = str(m.get('match_time', ''))[:10]
+        fixture_id = _resolve_fixture_id(client, m, match_date)
         if fixture_id:
             odds = fetch_odds_for_fixture(client, fixture_id)
             if odds and odds.get("handicap"):
@@ -158,8 +161,9 @@ def analyze_matches(hours_ahead: int = 6) -> dict:
     from models.ai_referee import AIRefereeModel
     from pipeline.crown_score import calc_crown_index
     from pipeline.match_filter import filter_by_data_quality, filter_by_recommendation_quality
+    from utils.timeutil import now_utc
 
-    now = datetime.now()
+    now = now_utc()
     window = now + timedelta(hours=hours_ahead)
 
     # 获取pending比赛
@@ -341,14 +345,16 @@ def prematch_analyze(window_min: int = 45, window_max: int = 15) -> dict:
     )
     from scraper.apifootball_data import APIFootballClient
 
-    now = datetime.now()
+    from utils.timeutil import now_utc
+
+    now = now_utc()
     today = now.strftime('%Y-%m-%d')
 
     # 计算时间窗口: 开赛前 window_min ~ window_max 分钟
     win_start = now + timedelta(minutes=window_max)   # 最近的比赛(15分钟后)
     win_end = now + timedelta(minutes=window_min)     # 最远的比赛(45分钟后)
 
-    # 找出窗口内、已有首次分析、未结算、未做过临场分析的比赛
+    # 找出已有首次分析、未结算、未做过临场分析的pending比赛，再用aware时间过滤窗口
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -358,11 +364,15 @@ def prematch_analyze(window_min: int = 45, window_max: int = 15) -> dict:
         WHERE m.status = 'pending'
           AND p.settled_at IS NULL
           AND p.prematch_at IS NULL
-          AND m.match_time >= ?
-          AND m.match_time <= ?
-    """, (win_start.strftime('%Y-%m-%d %H:%M'), win_end.strftime('%Y-%m-%d %H:%M')))
-    candidates = [dict(r) for r in cursor.fetchall()]
+    """)
+    rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
+
+    candidates = []
+    for m in rows:
+        kickoff = _parse_time(m['match_time'])
+        if kickoff and win_start <= kickoff <= win_end:
+            candidates.append(m)
 
     if not candidates:
         log.info(f"[prematch] 无{window_max}~{window_min}分钟内待二次分析的比赛")
@@ -677,10 +687,13 @@ def _build_consensus_reason(model_results: dict, consensus_dir: str) -> str:
 def _save_funnel(after_l1, after_l2, after_l3, a, b, c):
     """保存漏斗统计"""
     try:
-        today = datetime.now().strftime('%Y-%m-%d')
+        from utils.timeutil import today_shanghai, today_utc_range
+        today = today_shanghai()  # log_date用北京自然日
+        utc_start, utc_end = today_utc_range()
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM matches WHERE match_time LIKE ?", (f"{today}%",))
+        cursor.execute("SELECT COUNT(*) FROM matches WHERE match_time >= ? AND match_time <= ?",
+                       (utc_start, utc_end))
         total = cursor.fetchone()[0]
         conn.close()
         save_filter_funnel(today, {

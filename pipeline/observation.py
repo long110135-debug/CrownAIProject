@@ -40,27 +40,35 @@ def collect_observation() -> dict:
     conn.close()
 
     # 影子对照实验统计(独立查询，不需要cursor)
-    from utils.database import get_experiment_stats
+    from utils.database import get_experiment_stats, get_recommendation_pnl
     result["shadow_experiment"] = get_experiment_stats()
+
+    # 主推荐收益/ROI(基于hit_result, push计分母, invalid/no_bet排除)
+    result["recommendation_pnl"] = get_recommendation_pnl()
 
     return result
 
 
 def _run_health(cursor, today: str) -> dict:
     """每日运行健康"""
+    from utils.timeutil import shanghai_day_to_utc_range
+    utc_start, utc_end = shanghai_day_to_utc_range(today)
+
     # sync写入比赛数
-    cursor.execute("SELECT COUNT(*) FROM matches WHERE match_time LIKE ?", (f"{today}%",))
+    cursor.execute("SELECT COUNT(*) FROM matches WHERE match_time >= ? AND match_time <= ?",
+                   (utc_start, utc_end))
     sync_count = cursor.fetchone()[0]
 
     # track成功获取盘口的比赛数(今日timeline去重match_id)
     cursor.execute("""
         SELECT COUNT(DISTINCT match_id) FROM odds_timeline 
-        WHERE record_time LIKE ?
-    """, (f"{today}%",))
+        WHERE record_time >= ? AND record_time <= ?
+    """, (utc_start, utc_end))
     track_count = cursor.fetchone()[0]
 
     # odds_timeline今日新增记录数
-    cursor.execute("SELECT COUNT(*) FROM odds_timeline WHERE record_time LIKE ?", (f"{today}%",))
+    cursor.execute("SELECT COUNT(*) FROM odds_timeline WHERE record_time >= ? AND record_time <= ?",
+                   (utc_start, utc_end))
     timeline_new = cursor.fetchone()[0]
 
     # analyze: 总比赛数、L2通过数
@@ -79,7 +87,8 @@ def _run_health(cursor, today: str) -> dict:
         analyze_total = l2_passed = level_a = level_b = level_c = 0
 
     # closing_odds今日新增
-    cursor.execute("SELECT COUNT(*) FROM closing_odds WHERE closing_time LIKE ?", (f"{today}%",))
+    cursor.execute("SELECT COUNT(*) FROM closing_odds WHERE closing_time >= ? AND closing_time <= ?",
+                   (utc_start, utc_end))
     closing_new = cursor.fetchone()[0]
 
     # settle: 已结算/待结算
@@ -263,12 +272,14 @@ def _by_league(cursor) -> list:
     cursor.execute("""
         SELECT league, COUNT(*) as total,
                SUM(CASE WHEN hit >= 0 THEN 1 ELSE 0 END) as settled,
+               SUM(CASE WHEN hit IN (0, 1) THEN 1 ELSE 0 END) as decided,
                SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) as hit_count
         FROM prediction_history
         WHERE model_version = ?
         GROUP BY league ORDER BY total DESC
     """, (MODEL_VERSION,))
-    return [{"league": r[0], "total": r[1], "settled": r[2] or 0, "hit": r[3] or 0}
+    return [{"league": r[0], "total": r[1], "settled": r[2] or 0,
+             "decided": r[3] or 0, "hit": r[4] or 0}
             for r in cursor.fetchall()]
 
 
@@ -307,6 +318,7 @@ def _by_level(cursor) -> list:
     cursor.execute("""
         SELECT level, COUNT(*) as total,
                SUM(CASE WHEN hit >= 0 THEN 1 ELSE 0 END) as settled,
+               SUM(CASE WHEN hit IN (0, 1) THEN 1 ELSE 0 END) as decided,
                SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) as hit_count,
                AVG(crown_index) as avg_index
         FROM prediction_history
@@ -314,7 +326,8 @@ def _by_level(cursor) -> list:
         GROUP BY level ORDER BY level
     """, (MODEL_VERSION,))
     return [{"level": r[0] or "NULL", "total": r[1], "settled": r[2] or 0,
-             "hit": r[3] or 0, "avg_index": round(r[4], 1) if r[4] else None}
+             "decided": r[3] or 0, "hit": r[4] or 0,
+             "avg_index": round(r[5], 1) if r[5] else None}
             for r in cursor.fetchall()]
 
 
@@ -392,13 +405,14 @@ def _neutral_analysis(cursor) -> dict:
 def _near_threshold(cursor) -> list:
     """距离推荐门槛(75)1至3分的比赛及赛后表现"""
     cursor.execute("""
-        SELECT match_id, home_team, away_team, league, crown_index, level, hit, result_score
+        SELECT match_id, home_team, away_team, league, crown_index, level, hit, result_score, hit_result
         FROM prediction_history
         WHERE crown_index >= 72 AND crown_index < 75
         ORDER BY crown_index DESC
     """)
     return [{"match_id": r[0], "home": r[1], "away": r[2], "league": r[3],
-             "crown_index": r[4], "level": r[5], "hit": r[6], "score": r[7]}
+             "crown_index": r[4], "level": r[5], "hit": r[6], "score": r[7],
+             "hit_result": r[8]}
             for r in cursor.fetchall()]
 
 
@@ -434,7 +448,7 @@ def print_observation(data: dict):
 
     print(f"\n  ┌─ 按联赛 ─────────────────────────────────")
     for lg in data["by_league"][:8]:
-        hr = f"{lg['hit']}/{lg['settled']}" if lg['settled'] > 0 else "-"
+        hr = f"{lg['hit']}/{lg['decided']}" if lg['decided'] > 0 else "-"
         print(f"  │ {lg['league']:<12} {lg['total']:>3}场 结算{lg['settled']:>2} 命中{hr}")
     print(f"  └──────────────────────────────────────────")
 
@@ -445,7 +459,7 @@ def print_observation(data: dict):
 
     print(f"\n  ┌─ 按等级 ─────────────────────────────────")
     for lv in data["by_level"]:
-        hr = f"{lv['hit']}/{lv['settled']}" if lv['settled'] > 0 else "-"
+        hr = f"{lv['hit']}/{lv['decided']}" if lv['decided'] > 0 else "-"
         print(f"  │ {lv['level']}: {lv['total']:>3}场 结算{lv['settled']:>2} 命中{hr} 均指数{lv['avg_index']}")
     print(f"  └──────────────────────────────────────────")
 
@@ -464,7 +478,10 @@ def print_observation(data: dict):
     if near:
         print(f"\n  ┌─ 距门槛(75)1~3分: {len(near)}场 ─────────────────")
         for n in near[:5]:
-            hit_str = {1: "✓", 0: "✗", -1: "?"}.get(n["hit"], "?")
+            hr = n.get("hit_result") or ""
+            hit_str = {"win": "✓", "half_win": "✓", "loss": "✗", "half_loss": "✗",
+                       "push": "◐", "no_bet": "·", "invalid": "·"}.get(
+                           hr, {1: "✓", 0: "✗", -1: "?"}.get(n["hit"], "?"))
             print(f"  │ {hit_str} {n['home']} vs {n['away']} [{n['league']}] 指数{n['crown_index']} {n['score'] or ''}")
         print(f"  └──────────────────────────────────────────")
 
@@ -483,6 +500,15 @@ def print_observation(data: dict):
             print(f"  │ consensus PnL: {se['consensus_pnl']:+.1f} ({se['consensus_bet_count']}注) ROI={se['consensus_roi']}%")
         else:
             print(f"  │ (尚无已结算数据)")
+        print(f"  └──────────────────────────────────────────")
+
+    # 主推荐收益(基于hit_result)
+    rp = data.get("recommendation_pnl", {})
+    if rp.get("bet_count", 0) > 0:
+        print(f"\n  ┌─ 主推荐收益(基于hit_result) ──────────────")
+        dist = rp.get("distribution", {})
+        print(f"  │ 分布: W{dist.get('win',0)} HW{dist.get('half_win',0)} P{dist.get('push',0)} HL{dist.get('half_loss',0)} L{dist.get('loss',0)} NB{dist.get('no_bet',0)} INV{dist.get('invalid',0)}")
+        print(f"  │ 总PnL: {rp['total_pnl']:+.2f} | 投注额: {rp['bet_count']}注(含push) | ROI: {rp['roi']}%")
         print(f"  └──────────────────────────────────────────")
 
     # 观察期进度

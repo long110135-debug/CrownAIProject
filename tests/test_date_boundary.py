@@ -103,21 +103,24 @@ class TestNormalizeDateBoundary(unittest.TestCase):
 
 
 class TestParseMatchTimeBoundary(unittest.TestCase):
-    """parse_match_time跨年"""
+    """parse_match_time跨年(返回aware datetime: 中文→Shanghai, ISO→UTC)"""
 
     def test_dec31_jan01_with_time(self):
+        from utils.timeutil import SHANGHAI
         ref = datetime(2026, 12, 31)
         result = parse_match_time("01月01日 20:00", ref)
-        self.assertEqual(result, datetime(2027, 1, 1, 20, 0))
+        self.assertEqual(result, datetime(2027, 1, 1, 20, 0, tzinfo=SHANGHAI))
 
     def test_jan01_dec31_with_time(self):
+        from utils.timeutil import SHANGHAI
         ref = datetime(2027, 1, 1)
         result = parse_match_time("12月31日 22:30", ref)
-        self.assertEqual(result, datetime(2026, 12, 31, 22, 30))
+        self.assertEqual(result, datetime(2026, 12, 31, 22, 30, tzinfo=SHANGHAI))
 
     def test_iso_format(self):
+        from utils.timeutil import UTC
         result = parse_match_time("2026-07-28 15:00")
-        self.assertEqual(result, datetime(2026, 7, 28, 15, 0))
+        self.assertEqual(result, datetime(2026, 7, 28, 15, 0, tzinfo=UTC))
 
     def test_none_input(self):
         self.assertIsNone(parse_match_time(None))

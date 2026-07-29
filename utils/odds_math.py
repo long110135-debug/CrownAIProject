@@ -7,24 +7,84 @@ import re
 from typing import Optional, Tuple
 
 
+# 中文盘口术语 → 数值(绝对值)
+_CN_HANDICAP_TERMS = {
+    "平手": 0.0,
+    "平半": 0.25,   # 平手/半球
+    "半球": 0.5,
+    "半一": 0.75,   # 半球/一球
+    "一球": 1.0,
+    "半二": 1.25,   # 半球/二球 (1.25)
+    "球半": 1.5,    # 一球半
+    "半三": 1.75,
+    "两球": 2.0,
+    "球半两": 1.75,
+    "半四": 2.25,
+    "两球半": 2.5,
+    "三球": 3.0,
+}
+
+
+def parse_handicap_strict(handicap_str) -> Optional[float]:
+    """
+    严格解析盘口文字 → 主队视角数值(主让为正, 客让为负)。
+    无法解析返回 None(不静默归0)，供调用方记录原字符串+match_id。
+
+    支持格式:
+      主让0.5 / 客让1 / 受0.5         (中文方向前缀)
+      +0.5 / -0.5 / 0.5               (符号/纯数字)
+      平手                            (中文术语=0)
+      -0/0.5 / +1/1.5 / 0/0.5         (x/y分数格式, 取两数均值)
+      主让半球 / 客让平半 / 受球半       (中文术语+方向)
+    """
+    if handicap_str is None:
+        return None
+    s = str(handicap_str).strip()
+    if not s:
+        return None
+
+    # 方向: 客让/受/负号 → 负(客队让球); 主让/正号 → 正
+    negative = ("客让" in s) or ("受" in s) or s.startswith("-")
+
+    # 去掉中文方向前缀, 得到核心部分
+    core = s.replace("主让", "").replace("客让", "").replace("受", "").strip()
+    core = core.lstrip("+-").strip()
+
+    # 中文术语(在core或原串中匹配最长词)
+    for term in sorted(_CN_HANDICAP_TERMS, key=len, reverse=True):
+        if term in core or term in s:
+            val = _CN_HANDICAP_TERMS[term]
+            return -val if negative else val
+
+    # x/y 分数格式: 取两数均值 (如 0/0.5 → 0.25, 1/1.5 → 1.25)
+    if "/" in core:
+        nums = []
+        for part in core.split("/"):
+            m = re.findall(r"\d+(?:\.\d+)?", part)
+            if m:
+                nums.append(float(m[0]))
+        if len(nums) == 2:
+            val = (nums[0] + nums[1]) / 2
+            return -val if negative else val
+
+    # 普通数字
+    nums = re.findall(r"\d+(?:\.\d+)?", core)
+    if nums:
+        val = float(nums[0])
+        return -val if negative else val
+
+    return None  #  genuinely 无法解析
+
+
 def handicap_to_number(handicap_str: str) -> float:
     """
-    盘口文字转数值(唯一实现)
-    '主让0.5' → 0.5
-    '客让1' → -1.0
-    '平手' → 0.0
-    '-0.5' → -0.5
+    盘口文字转数值(唯一实现, 向后兼容)。
+    '主让0.5'→0.5, '客让1'→-1.0, '平手'→0.0, '-0.5'→-0.5,
+    '-0/0.5'→-0.25, '半球'→0.5。
+    无法解析时返回0.0(需检测失败请用 parse_handicap_strict)。
     """
-    if not handicap_str:
-        return 0.0
-    s = str(handicap_str).strip()
-    nums = re.findall(r'[\d.]+', s)
-    if not nums:
-        return 0.0
-    val = float(nums[0])
-    if "客让" in s or "受" in s or s.startswith('-'):
-        val = -val
-    return val
+    val = parse_handicap_strict(handicap_str)
+    return val if val is not None else 0.0
 
 
 def number_to_handicap(val: float) -> str:
