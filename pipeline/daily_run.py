@@ -52,6 +52,7 @@ def sync_today() -> int:
         return 0
 
     count = 0
+    from utils.timeutil import utc_iso, parse_to_aware
     for lid, name in ALL_LEAGUE_IDS.items():
         try:
             s = now.year if lid in nordic_leagues else season
@@ -62,7 +63,8 @@ def sync_today() -> int:
                     away_en = f['teams']['away']['name']
                     home_cn = en_to_cn.get(home_en, home_en)
                     away_cn = en_to_cn.get(away_en, away_en)
-                    kickoff = client._format_time(f['fixture']['date'])
+                    # match_time统一存UTC ISO(API返回UTC，规范化后存储)
+                    kickoff = utc_iso(parse_to_aware(f['fixture']['date']))
                     match_id = f"CROWN_{name}_{home_cn}_{away_cn}_{today}"
 
                     save_match({
