@@ -166,6 +166,10 @@ def _consensus_direction(model_results: dict) -> str:
     draw_weight = 0
 
     for name, result in model_results.items():
+        # ai_referee是裁决模型(approve/downgrade/reject)，其direction是其余四模型
+        # 多数票的复制，若计入会重复放大多数派信号，故方向投票排除它。
+        if name == "ai_referee":
+            continue
         if not isinstance(result, dict):
             continue
         direction = result.get("direction", "neutral")

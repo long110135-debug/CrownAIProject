@@ -74,5 +74,17 @@ DAILY_CONFIG = {
 }
 
 # === 版本 ===
-VERSION = "Crown_v1.0.0"
-MODEL_VERSION = "CrownAI_1.0"
+VERSION = "Crown_v2.0.0"
+# MODEL_VERSION 标记预测记录的模型逻辑版本。
+# 2.0 = 重大逻辑修订(时区UTC→CST、赔率格式归一化为亚洲盘、盘口方向语义修复、
+#       ai_referee退出方向投票、asian_open存真开盘)。观察期计数从本版本重新起算，
+#       旧CrownAI_1.0记录保留为历史但不计入新观察期。
+MODEL_VERSION = "CrownAI_2.0"
+
+# === 观察期阶段 ===
+# validation = 验证期: 新数据为debug_sample，不计入正式观察期门槛，正式观察期未开始。
+# formal     = 正式观察期: 数据计入300/200/50/30门槛。
+OBSERVATION_PHASE = "validation"
+# 计入正式观察期门槛的模型版本集合。验证期为空 → 正式进度恒0/300。
+# 升级某版本为正式时，将其加入此集合(如 ["CrownAI_2.1"])。
+FORMAL_OBSERVATION_VERSIONS = []

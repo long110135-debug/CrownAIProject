@@ -6,6 +6,8 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from config.settings import MODEL_VERSION
+
 
 class TestObservationStats(unittest.TestCase):
     """使用临时DB和固定样本验证统计逻辑"""
@@ -31,27 +33,27 @@ class TestObservationStats(unittest.TestCase):
         conn = self.db_mod.get_connection()
         cursor = conn.cursor()
 
-        # 3条prediction: 1条A级已结算命中, 1条B级已结算未命中, 1条C级未结算
-        cursor.execute("""INSERT INTO prediction_history 
+        # 3条prediction(当前模型版本): 1条A级已结算命中, 1条B级已结算未命中, 1条C级未结算
+        cursor.execute(f"""INSERT INTO prediction_history 
             (match_id, league, home_team, away_team, kickoff, crown_index, level, hit,
              model_version, model_weights, ai_decision, odds_home_water, odds_away_water,
              asian_live, recommend, clv_handicap, data_completeness)
             VALUES ('M001', '英超', '阿森纳', '切尔西', '2026-07-28 20:00', 82, 'A', 1,
-             'CrownAI_1.3', '{"strength":0.25}', 'approve', 0.92, 0.95,
+             '{MODEL_VERSION}', '{{"strength":0.25}}', 'approve', 0.92, 0.95,
              '主让0.5', 'home', 0.25, 90)""")
-        cursor.execute("""INSERT INTO prediction_history 
+        cursor.execute(f"""INSERT INTO prediction_history 
             (match_id, league, home_team, away_team, kickoff, crown_index, level, hit,
              model_version, model_weights, ai_decision, odds_home_water, odds_away_water,
              asian_live, recommend, clv_handicap, data_completeness)
             VALUES ('M002', '西甲', '巴萨', '皇马', '2026-07-28 22:00', 76, 'B', 0,
-             'CrownAI_1.3', '{"strength":0.25}', 'downgrade', 0.88, 1.00,
+             '{MODEL_VERSION}', '{{"strength":0.25}}', 'downgrade', 0.88, 1.00,
              '主让0.25', 'home', -0.25, 85)""")
-        cursor.execute("""INSERT INTO prediction_history 
+        cursor.execute(f"""INSERT INTO prediction_history 
             (match_id, league, home_team, away_team, kickoff, crown_index, level, hit,
              model_version, model_weights, ai_decision, odds_home_water, odds_away_water,
              asian_live, recommend, clv_handicap, data_completeness)
             VALUES ('M003', '德甲', '拜仁', '多特', '2026-07-29 20:00', 65, 'C', -1,
-             'CrownAI_1.3', '{"strength":0.25}', 'approve', 0.90, 0.95,
+             '{MODEL_VERSION}', '{{"strength":0.25}}', 'approve', 0.90, 0.95,
              '主让1', 'neutral', NULL, 70)""")
 
         # 1条旧记录(NULL字段)
@@ -90,9 +92,9 @@ class TestObservationStats(unittest.TestCase):
         from pipeline.observation import collect_observation
         data = collect_observation()
         s = data["sample_stats"]
-        self.assertEqual(s["total_recommendations"], 4)
+        self.assertEqual(s["total_recommendations"], 3)  # M001-M003(M004旧版本不计)
         self.assertEqual(s["settled"], 2)  # M001 hit=1, M002 hit=0
-        self.assertEqual(s["unsettled"], 2)  # M003, M004 hit=-1
+        self.assertEqual(s["unsettled"], 1)  # M003 hit=-1
         self.assertEqual(s["has_closing_data"], 1)  # 只有M001有closing
 
     def test_settlement_breakdown(self):
@@ -121,7 +123,7 @@ class TestObservationStats(unittest.TestCase):
         self.assertEqual(ht["integer"], 1)  # M003 主让1
         self.assertEqual(ht["quarter_025"], 1)  # M002 主让0.25
         self.assertEqual(ht["half_050"], 1)  # M001 主让0.5
-        self.assertEqual(ht["quarter_075"], 1)  # M004 主让0.75
+        self.assertEqual(ht["quarter_075"], 0)  # M004旧版本不计
 
     def test_null_tracking(self):
         """NULL追踪: 旧记录单独统计"""
@@ -156,7 +158,7 @@ class TestObservationStats(unittest.TestCase):
         data = collect_observation()
         leagues = {lg["league"]: lg for lg in data["by_league"]}
         self.assertIn("英超", leagues)
-        self.assertEqual(leagues["英超"]["total"], 2)  # M001 + M004
+        self.assertEqual(leagues["英超"]["total"], 1)  # M001(M004旧版本不计)
 
     def test_near_threshold(self):
         """距门槛1~3分: 无(本样本中无72-75分记录)"""

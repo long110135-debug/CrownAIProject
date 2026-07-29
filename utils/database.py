@@ -400,6 +400,9 @@ def init_db():
     # === 迁移: 为旧prediction_history添加CLV字段(如果缺失) ===
     _migrate_prediction_clv(cursor, conn)
 
+    # === 迁移: 临场二次分析字段 ===
+    _migrate_prematch_columns(cursor, conn)
+
     conn.close()
 
 
@@ -426,6 +429,98 @@ def _migrate_prediction_clv(cursor, conn):
         conn.commit()
     except Exception:
         pass
+
+
+def _migrate_prematch_columns(cursor, conn):
+    """为临场二次分析添加字段(兼容旧库，可重复执行)"""
+    try:
+        # prediction_history: 临场分析快照
+        cursor.execute("PRAGMA table_info(prediction_history)")
+        ph_cols = [row[1] for row in cursor.fetchall()]
+        prematch_cols = {
+            "prematch_at": "TEXT",
+            "prematch_handicap": "TEXT",
+            "prematch_home_water": "REAL",
+            "prematch_away_water": "REAL",
+            "prematch_crown_index": "REAL",
+            "prematch_recommend": "TEXT",
+            "prematch_strength_score": "REAL",
+            "prematch_handicap_score": "REAL",
+            "prematch_market_score": "REAL",
+            "hit_result": "TEXT",
+        }
+        for col, col_type in prematch_cols.items():
+            if col not in ph_cols:
+                cursor.execute(f"ALTER TABLE prediction_history ADD COLUMN {col} {col_type}")
+
+        # recommendation_experiments: 临场共识方向
+        cursor.execute("PRAGMA table_info(recommendation_experiments)")
+        exp_cols = [row[1] for row in cursor.fetchall()]
+        exp_new = {
+            "prematch_consensus": "TEXT",
+            "prematch_consensus_reason": "TEXT",
+            "prematch_at": "TEXT",
+        }
+        for col, col_type in exp_new.items():
+            if col not in exp_cols:
+                cursor.execute(f"ALTER TABLE recommendation_experiments ADD COLUMN {col} {col_type}")
+
+        conn.commit()
+    except Exception:
+        pass
+
+
+def save_prematch_update(match_id: str, data: dict):
+    """
+    写入临场二次分析结果(只更新prematch_*列，不触碰首次分析和结算字段)
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE prediction_history SET
+                prematch_at = ?,
+                prematch_handicap = ?,
+                prematch_home_water = ?,
+                prematch_away_water = ?,
+                prematch_crown_index = ?,
+                prematch_recommend = ?,
+                prematch_strength_score = ?,
+                prematch_handicap_score = ?,
+                prematch_market_score = ?
+            WHERE match_id = ?
+        """, (
+            data.get("prematch_at"),
+            data.get("prematch_handicap"),
+            data.get("prematch_home_water"),
+            data.get("prematch_away_water"),
+            data.get("prematch_crown_index"),
+            data.get("prematch_recommend"),
+            data.get("prematch_strength_score"),
+            data.get("prematch_handicap_score"),
+            data.get("prematch_market_score"),
+            match_id,
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_prematch_experiment(match_id: str, consensus_dir: str, reason: str):
+    """更新影子实验的临场共识方向"""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE recommendation_experiments SET
+                prematch_consensus = ?,
+                prematch_consensus_reason = ?,
+                prematch_at = ?
+            WHERE match_id = ? AND settled_at IS NULL
+        """, (consensus_dir, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), match_id))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def save_match(match_data: dict) -> str:
@@ -633,10 +728,12 @@ def save_prediction(record: dict):
         conn.close()
 
 
-def settle_prediction(match_id: str, result: str, result_score: str, hit: int, error_reason: str = ""):
+def settle_prediction(match_id: str, result: str, result_score: str, hit: int,
+                      error_reason: str = "", hit_result: str = ""):
     """
     结算预测（比赛结束后调用）
-    hit: 1=命中, 0=未命中, -1=未结算
+    hit: 1=命中, 0=未命中, -1=未结算, 2=不参与命中率(push/no_bet/invalid)
+    hit_result: 唯一结算函数的详细结果 win/half_win/push/half_loss/loss/no_bet/invalid
     result: 胜/平/负
     result_score: 如 "2-1"
     """
@@ -644,10 +741,10 @@ def settle_prediction(match_id: str, result: str, result_score: str, hit: int, e
     cursor = conn.cursor()
     cursor.execute("""
         UPDATE prediction_history
-        SET result = ?, result_score = ?, hit = ?, error_reason = ?,
+        SET result = ?, result_score = ?, hit = ?, error_reason = ?, hit_result = ?,
             settled_at = datetime('now', 'localtime')
         WHERE match_id = ?
-    """, (result, result_score, hit, error_reason, match_id))
+    """, (result, result_score, hit, error_reason, hit_result, match_id))
     conn.commit()
     conn.close()
 
@@ -1397,44 +1494,47 @@ def settle_experiment(match_id: str, legacy_hit: str, consensus_hit: str,
 
 
 def get_experiment_stats() -> dict:
-    """获取影子实验统计(observe报表用)"""
+    """获取影子实验统计(observe报表用，仅统计当前模型版本)"""
+    from config.settings import MODEL_VERSION
+
     conn = get_connection()
     cursor = conn.cursor()
+    v = MODEL_VERSION
 
     # 基础统计
-    cursor.execute("SELECT COUNT(*) FROM recommendation_experiments")
+    cursor.execute("SELECT COUNT(*) FROM recommendation_experiments WHERE model_version = ?", (v,))
     total = cursor.fetchone()[0]
 
-    cursor.execute("SELECT COUNT(*) FROM recommendation_experiments WHERE settled_at IS NOT NULL")
+    cursor.execute("SELECT COUNT(*) FROM recommendation_experiments WHERE settled_at IS NOT NULL AND model_version = ?", (v,))
     settled = cursor.fetchone()[0]
 
     # 方向一致性
     cursor.execute("""
         SELECT COUNT(*) FROM recommendation_experiments
-        WHERE legacy_recommend = consensus_recommend AND settled_at IS NOT NULL
-    """)
+        WHERE legacy_recommend = consensus_recommend AND settled_at IS NOT NULL AND model_version = ?
+    """, (v,))
     agree = cursor.fetchone()[0]
 
     cursor.execute("""
         SELECT COUNT(*) FROM recommendation_experiments
-        WHERE legacy_recommend != consensus_recommend AND settled_at IS NOT NULL
-    """)
+        WHERE legacy_recommend != consensus_recommend AND settled_at IS NOT NULL AND model_version = ?
+    """, (v,))
     disagree = cursor.fetchone()[0]
 
     # legacy结算分布
     cursor.execute("""
         SELECT legacy_hit, COUNT(*) as cnt FROM recommendation_experiments
-        WHERE settled_at IS NOT NULL AND legacy_hit IS NOT NULL
+        WHERE settled_at IS NOT NULL AND legacy_hit IS NOT NULL AND model_version = ?
         GROUP BY legacy_hit
-    """)
+    """, (v,))
     legacy_dist = {row[0]: row[1] for row in cursor.fetchall()}
 
     # consensus结算分布
     cursor.execute("""
         SELECT consensus_hit, COUNT(*) as cnt FROM recommendation_experiments
-        WHERE settled_at IS NOT NULL AND consensus_hit IS NOT NULL
+        WHERE settled_at IS NOT NULL AND consensus_hit IS NOT NULL AND model_version = ?
         GROUP BY consensus_hit
-    """)
+    """, (v,))
     consensus_dist = {row[0]: row[1] for row in cursor.fetchall()}
 
     # PnL
@@ -1442,8 +1542,8 @@ def get_experiment_stats() -> dict:
         SELECT SUM(legacy_pnl), SUM(consensus_pnl),
                COUNT(CASE WHEN legacy_pnl IS NOT NULL THEN 1 END),
                COUNT(CASE WHEN consensus_pnl IS NOT NULL THEN 1 END)
-        FROM recommendation_experiments WHERE settled_at IS NOT NULL
-    """)
+        FROM recommendation_experiments WHERE settled_at IS NOT NULL AND model_version = ?
+    """, (v,))
     pnl_row = cursor.fetchone()
     legacy_pnl = pnl_row[0] or 0
     consensus_pnl = pnl_row[1] or 0
@@ -1464,6 +1564,9 @@ def get_experiment_stats() -> dict:
         "consensus_pnl": consensus_pnl,
         "legacy_bet_count": legacy_bet_count,
         "consensus_bet_count": consensus_bet_count,
+        # ROI口径: 分母bet_count=COUNT(pnl IS NOT NULL)含push(push的pnl=0.0非NULL)。
+        # 即 ROI=总净利润/总投注额，push贡献0利润但计1单位投注额。
+        # 胜率可排除push，但ROI不得排除push投注额。
         "legacy_roi": round(legacy_pnl / legacy_bet_count * 100, 1) if legacy_bet_count > 0 else None,
         "consensus_roi": round(consensus_pnl / consensus_bet_count * 100, 1) if consensus_bet_count > 0 else None,
     }

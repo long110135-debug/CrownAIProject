@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Optional
 from utils.database import get_connection
 from utils.logger import log
+from config.settings import MODEL_VERSION, OBSERVATION_PHASE, FORMAL_OBSERVATION_VERSIONS
 
 
 def collect_observation() -> dict:
@@ -32,6 +33,8 @@ def collect_observation() -> dict:
         "null_tracking": _null_tracking(cursor),
         "neutral_analysis": _neutral_analysis(cursor),
         "near_threshold": _near_threshold(cursor),
+        "observation_phase": OBSERVATION_PHASE,
+        "formal_progress": _formal_progress(cursor),
     }
 
     conn.close()
@@ -139,21 +142,25 @@ def _run_health(cursor, today: str) -> dict:
 
 
 def _sample_stats(cursor) -> dict:
-    """样本观察指标"""
-    cursor.execute("SELECT COUNT(*) FROM prediction_history")
+    """样本观察指标(仅统计当前模型版本，版本升级即观察期重置)"""
+    cursor.execute("SELECT COUNT(*) FROM prediction_history WHERE model_version = ?",
+                   (MODEL_VERSION,))
     total = cursor.fetchone()[0]
 
-    cursor.execute("SELECT COUNT(*) FROM prediction_history WHERE hit >= 0")
+    cursor.execute("SELECT COUNT(*) FROM prediction_history WHERE hit >= 0 AND model_version = ?",
+                   (MODEL_VERSION,))
     settled = cursor.fetchone()[0]
 
-    cursor.execute("SELECT COUNT(*) FROM prediction_history WHERE hit = -1")
+    cursor.execute("SELECT COUNT(*) FROM prediction_history WHERE hit = -1 AND model_version = ?",
+                   (MODEL_VERSION,))
     unsettled = cursor.fetchone()[0]
 
     # 有完整收盘数据
     cursor.execute("""
         SELECT COUNT(*) FROM prediction_history p
-        WHERE EXISTS (SELECT 1 FROM closing_odds c WHERE c.match_id = p.match_id)
-    """)
+        WHERE p.model_version = ?
+          AND EXISTS (SELECT 1 FROM closing_odds c WHERE c.match_id = p.match_id)
+    """, (MODEL_VERSION,))
     has_closing = cursor.fetchone()[0]
 
     return {
@@ -162,7 +169,48 @@ def _sample_stats(cursor) -> dict:
         "unsettled": unsettled,
         "has_closing_data": has_closing,
         "no_closing_data": total - has_closing,
+        "model_version": MODEL_VERSION,
     }
+
+
+def _formal_progress(cursor) -> dict:
+    """正式观察期门槛进度(仅统计 FORMAL_OBSERVATION_VERSIONS 内的版本)。
+
+    验证期该集合为空 → 全部计数为0，正式观察期未开始。
+    新数据(validation版本)为debug_sample，不计入此进度。
+    """
+    versions = FORMAL_OBSERVATION_VERSIONS
+    if not versions:
+        return {"total_recommendations": 0, "has_closing_data": 0, "quarter_count": 0,
+                "formal_versions": []}
+
+    placeholders = ",".join("?" * len(versions))
+
+    cursor.execute(f"SELECT COUNT(*) FROM prediction_history WHERE model_version IN ({placeholders})",
+                   versions)
+    total = cursor.fetchone()[0]
+
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM prediction_history p
+        WHERE p.model_version IN ({placeholders})
+          AND EXISTS (SELECT 1 FROM closing_odds c WHERE c.match_id = p.match_id)
+    """, versions)
+    has_closing = cursor.fetchone()[0]
+
+    cursor.execute(f"SELECT asian_live, asian_open FROM prediction_history WHERE model_version IN ({placeholders})",
+                   versions)
+    from utils.odds_math import handicap_to_number
+    quarter = 0
+    for row in cursor.fetchall():
+        hdp_str = row[0] or row[1]
+        if not hdp_str:
+            continue
+        frac = abs(handicap_to_number(hdp_str)) % 1.0
+        if abs(frac - 0.25) < 0.01 or abs(frac - 0.75) < 0.01:
+            quarter += 1
+
+    return {"total_recommendations": total, "has_closing_data": has_closing,
+            "quarter_count": quarter, "formal_versions": versions}
 
 
 def _settlement_breakdown(cursor) -> dict:
@@ -211,21 +259,23 @@ def _clv_distribution(cursor) -> dict:
 
 
 def _by_league(cursor) -> list:
-    """按联赛统计样本数"""
+    """按联赛统计样本数(仅当前模型版本)"""
     cursor.execute("""
         SELECT league, COUNT(*) as total,
                SUM(CASE WHEN hit >= 0 THEN 1 ELSE 0 END) as settled,
                SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) as hit_count
         FROM prediction_history
+        WHERE model_version = ?
         GROUP BY league ORDER BY total DESC
-    """)
+    """, (MODEL_VERSION,))
     return [{"league": r[0], "total": r[1], "settled": r[2] or 0, "hit": r[3] or 0}
             for r in cursor.fetchall()]
 
 
 def _by_handicap_type(cursor) -> dict:
     """按盘口类型统计: 整数/0.25/0.5/0.75/其他/NULL"""
-    cursor.execute("SELECT asian_live, asian_open FROM prediction_history")
+    cursor.execute("SELECT asian_live, asian_open FROM prediction_history WHERE model_version = ?",
+                   (MODEL_VERSION,))
     rows = cursor.fetchall()
 
     from utils.odds_math import handicap_to_number
@@ -253,15 +303,16 @@ def _by_handicap_type(cursor) -> dict:
 
 
 def _by_level(cursor) -> list:
-    """按推荐等级统计"""
+    """按推荐等级统计(仅当前模型版本)"""
     cursor.execute("""
         SELECT level, COUNT(*) as total,
                SUM(CASE WHEN hit >= 0 THEN 1 ELSE 0 END) as settled,
                SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) as hit_count,
                AVG(crown_index) as avg_index
         FROM prediction_history
+        WHERE model_version = ?
         GROUP BY level ORDER BY level
-    """)
+    """, (MODEL_VERSION,))
     return [{"level": r[0] or "NULL", "total": r[1], "settled": r[2] or 0,
              "hit": r[3] or 0, "avg_index": round(r[4], 1) if r[4] else None}
             for r in cursor.fetchall()]
@@ -435,11 +486,16 @@ def print_observation(data: dict):
         print(f"  └──────────────────────────────────────────")
 
     # 观察期进度
-    print(f"\n  ┌─ 观察期进度 ─────────────────────────────")
+    phase = data.get("observation_phase", "formal")
+    fp = data.get("formal_progress", {})
+    print(f"\n  ┌─ 观察期进度 (阶段: {phase}) ───────────────")
+    if phase == "validation":
+        print(f"  │ ⚠ 验证期: 正式观察期未开始，新数据为debug_sample不计入门槛")
+        print(f"  │ 当前版本({MODEL_VERSION})验证样本: {s['total_recommendations']}场 (debug_sample)")
     targets = [
-        ("总推荐≥300", s['total_recommendations'], 300),
-        ("已结算≥200(有收盘)", s['has_closing_data'], 200),
-        ("四分之一盘≥50", ht['quarter_025'] + ht['quarter_075'], 50),
+        ("总推荐≥300", fp.get('total_recommendations', 0), 300),
+        ("已结算≥200(有收盘)", fp.get('has_closing_data', 0), 200),
+        ("四分之一盘≥50", fp.get('quarter_count', 0), 50),
     ]
     for label, current, target in targets:
         pct = min(current / target * 100, 100)

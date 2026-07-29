@@ -7,6 +7,8 @@ import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from config.settings import MODEL_VERSION
+
 
 class TestShadowExperimentBase(unittest.TestCase):
     """基础测试: 使用临时DB"""
@@ -211,42 +213,50 @@ class TestShadowSettlement(TestShadowExperimentBase):
 
 
 class TestDirectionToHit(unittest.TestCase):
-    """_direction_to_hit结算逻辑"""
+    """唯一结算函数 settle_asian_handicap (替代旧_direction_to_hit)"""
 
     def setUp(self):
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from settle import _direction_to_hit
-        self.fn = _direction_to_hit
+        from utils.odds_math import settle_asian_handicap
+        self.fn = settle_asian_handicap
 
     def test_home_wins(self):
-        self.assertEqual(self.fn('home', 'home', ''), 'win')
+        self.assertEqual(self.fn('home', '平手', 1, 0), 'win')
 
     def test_home_loses(self):
-        self.assertEqual(self.fn('home', 'away', ''), 'loss')
+        self.assertEqual(self.fn('home', '平手', 0, 1), 'loss')
 
     def test_neutral_no_bet(self):
-        self.assertEqual(self.fn('neutral', 'home', ''), 'no_bet')
+        self.assertEqual(self.fn('neutral', '平手', 1, 0), 'no_bet')
 
     def test_empty_no_bet(self):
-        self.assertEqual(self.fn('', 'home', ''), 'no_bet')
+        self.assertEqual(self.fn('', '平手', 1, 0), 'no_bet')
 
     def test_draw_invalid(self):
-        self.assertEqual(self.fn('draw', 'home', ''), 'invalid')
+        self.assertEqual(self.fn('draw', '平手', 1, 0), 'invalid')
 
     def test_home_draw_home_cover(self):
-        self.assertEqual(self.fn('home', 'draw', 'home_cover'), 'win')
+        # 客让0.5, 0:0平局 → 主队受让覆盖 → win
+        self.assertEqual(self.fn('home', '客让0.5', 0, 0), 'win')
 
     def test_home_draw_away_cover(self):
-        self.assertEqual(self.fn('home', 'draw', 'away_cover'), 'loss')
+        # 主让0.5, 0:0平局 → 主队未覆盖 → loss
+        self.assertEqual(self.fn('home', '主让0.5', 0, 0), 'loss')
 
     def test_home_draw_push(self):
-        self.assertEqual(self.fn('home', 'draw', 'push'), 'push')
+        self.assertEqual(self.fn('home', '平手', 0, 0), 'push')
 
     def test_away_wins(self):
-        self.assertEqual(self.fn('away', 'away', ''), 'win')
+        self.assertEqual(self.fn('away', '平手', 0, 1), 'win')
 
     def test_away_loses(self):
-        self.assertEqual(self.fn('away', 'home', ''), 'loss')
+        self.assertEqual(self.fn('away', '平手', 1, 0), 'loss')
+
+    def test_quarter_half_win(self):
+        self.assertEqual(self.fn('home', '主让0.75', 1, 0), 'half_win')
+
+    def test_quarter_half_loss(self):
+        self.assertEqual(self.fn('home', '主让0.25', 0, 0), 'half_loss')
 
 
 class TestConsensusDirection(unittest.TestCase):
@@ -337,12 +347,12 @@ class TestObserveLegacyVsConsensus(TestShadowExperimentBase):
         """get_experiment_stats正确统计"""
         # 写入多条实验记录
         self.db_mod.save_experiment({
-            'match_id': 'OBS1', 'model_version': 'v1',
+            'match_id': 'OBS1', 'model_version': MODEL_VERSION,
             'legacy_recommend': 'neutral', 'consensus_recommend': 'home',
             'consensus_weights': {}, 'consensus_reason': '',
         })
         self.db_mod.save_experiment({
-            'match_id': 'OBS2', 'model_version': 'v1',
+            'match_id': 'OBS2', 'model_version': MODEL_VERSION,
             'legacy_recommend': 'home', 'consensus_recommend': 'home',
             'consensus_weights': {}, 'consensus_reason': '',
         })

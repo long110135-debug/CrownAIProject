@@ -10,6 +10,7 @@
   python3 scheduler.py track       更新盘口
   python3 scheduler.py analyze     分析即将开赛的比赛
   python3 scheduler.py close       锁定临场收盘赔率
+  python3 scheduler.py prematch    临场二次分析(开赛前15~45分钟)
   python3 scheduler.py settle      结算已结束比赛
   python3 scheduler.py report      生成日报+CLV报表
   python3 scheduler.py watchdog    健康检查
@@ -56,6 +57,17 @@ def cmd_close():
             close_odds()
     except LockConflictError:
         log.info("[close] 锁冲突，跳过本次")
+
+
+def cmd_prematch():
+    from pipeline.daily_run import prematch_analyze
+    try:
+        with TaskLock("analyze"):
+            result = prematch_analyze()
+            if result["updated"] > 0:
+                log.info(f"[prematch] 临场更新: {result['updated']}场")
+    except LockConflictError:
+        log.info("[prematch] 锁冲突，跳过本次")
 
 
 def cmd_settle():
@@ -232,6 +244,7 @@ if __name__ == "__main__":
         'track': cmd_track,
         'analyze': cmd_analyze,
         'close': cmd_close,
+        'prematch': cmd_prematch,
         'settle': cmd_settle,
         'report': cmd_report,
         'watchdog': cmd_watchdog,

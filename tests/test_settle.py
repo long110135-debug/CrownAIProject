@@ -9,13 +9,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 class TestSettleLogic(unittest.TestCase):
 
     def test_neutral_not_counted(self):
-        """neutral推荐 → hit=2(不计入命中率)"""
-        from settle import auto_settle
-        # 验证hit=2的逻辑存在
+        """neutral推荐 → no_bet → hit=2(不计入命中率)"""
+        from utils.odds_math import settle_asian_handicap
+        # neutral/空方向 → no_bet
+        self.assertEqual(settle_asian_handicap("neutral", "主让0.5", 1, 0), "no_bet")
+        self.assertEqual(settle_asian_handicap("", "主让0.5", 1, 0), "no_bet")
+        # no_bet 映射到 hit=2(不计入命中率): 验证auto_settle的映射逻辑
         import inspect
+        from settle import auto_settle
         src = inspect.getsource(auto_settle)
-        self.assertIn("hit = 2", src)
-        self.assertIn("neutral", src)
+        self.assertIn("hit = 2", src)  # push/no_bet/invalid → hit=2
 
     def test_hit_stats_exclude_hit2(self):
         """命中率统计应排除hit=2"""

@@ -145,12 +145,12 @@ class TestCollectorAndSnapshotConsistency(unittest.TestCase):
 
     def test_chinese_alias_consistency(self):
         """中文联赛别名标准化一致"""
-        # 皇冠返回"瑞典超级联赛"，系统应统一为"瑞超"
+        # 皇冠返回"瑞典超级联赛"→瑞超(Allsvenskan)
         mid1 = build_match_id("瑞典超级联赛", "A", "B", "01月01日")
+        # 皇冠返回"瑞典超级甲组联赛"→瑞甲(Superettan)
         mid2 = build_match_id("瑞典超级甲组联赛", "A", "B", "01月01日")
-        # 两者都映射到"瑞超"
         self.assertIn("瑞超", mid1)
-        self.assertIn("瑞超", mid2)
+        self.assertIn("瑞甲", mid2)
 
 
 class TestCollectorNoBusinessLogic(unittest.TestCase):

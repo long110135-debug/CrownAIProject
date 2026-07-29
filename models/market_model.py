@@ -70,9 +70,10 @@ class MarketModel(BaseModel):
         away_odds = odds.get("away_odds", 0.95)
         handicap = odds.get("current_handicap", odds.get("asian_handicap", ""))
 
-        # 让球方通常是热门
-        is_home_favorite = "主让" in str(handicap)
-        heat_side = "home" if is_home_favorite else "away"
+        # 让球方=热门(平手盘无热门→neutral)
+        from utils.odds_math import line_favorite
+        heat_side = line_favorite(handicap)
+        is_home_favorite = (heat_side == "home")
 
         # 热度指标 (如果有投注比例数据)
         heat_ratio = market_data.get("heat_ratio", {})  # {"home": 0.65, "away": 0.35}
@@ -179,18 +180,31 @@ class MarketModel(BaseModel):
         }
 
     def _determine_direction(self, heat, trap, flow) -> str:
-        """综合判断市场方向"""
-        # 如果检测到诱热，方向取反
-        if trap.get("is_trap"):
-            # 诱热方通常是热门方，反向操作
-            heat_side = heat.get("heat_side", "home")
-            return "away" if heat_side == "home" else "home"
+        """
+        综合判断市场方向。
 
-        # 否则跟随资金流向
+        核心修正(P0): 无诱热时方向跟随盘口线热门方(让球方)，而非水位流向。
+        受让方低水是结构性的，不代表资金方向；让球方才是市场认定的胜者。
+        诱热时保留反向操作(热门方是诱饵)。平手盘无热门时退回资金流向。
+        """
+        heat_side = heat.get("heat_side", "neutral")
+
+        # 诱热: 热门方是诱饵，反向操作
+        if trap.get("is_trap"):
+            if heat_side == "home":
+                return "away"
+            elif heat_side == "away":
+                return "home"
+            return "neutral"
+
+        # 无诱热: 跟随盘口线热门方(让球方)
+        if heat_side in ("home", "away"):
+            return heat_side
+
+        # 平手盘无热门: 退回资金流向
         flow_dir = flow.get("flow_direction", "balanced")
         if flow_dir != "balanced":
             return flow_dir
-
         return "neutral"
 
     def _calc_confidence(self, score, trap) -> float:

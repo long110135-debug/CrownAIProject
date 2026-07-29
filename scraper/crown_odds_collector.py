@@ -32,7 +32,7 @@ from utils.database import save_timeline_record
 
 # 皇冠联赛名 → 系统短名(唯一定义处)
 CROWN_LEAGUE_MAP = {
-    '瑞典超级联赛': '瑞超', '瑞典超级甲组联赛': '瑞超',
+    '瑞典超级联赛': '瑞超', '瑞典超级甲组联赛': '瑞甲',
     '芬兰超级联赛': '芬超',
     '挪威超级联赛': '挪超',
     '丹麦超级联赛': '丹超',
@@ -130,12 +130,16 @@ def save_api_odds(match_id: str, odds: dict, source: str = "api-football") -> bo
     if not odds or not odds.get("handicap"):
         return False
 
+    # API-Football返回欧洲盘十进制赔率，统一转换为亚洲盘水位(HK)后入库，
+    # 与crown_daemon源格式一致(模型阈值按亚洲盘水位校准)。
+    from utils.odds_math import decimal_to_hk_water
+
     save_timeline_record(match_id, {
         "handicap": odds["handicap"],
-        "home_water": odds.get("home_water", 0.95),
-        "away_water": odds.get("away_water", 0.95),
+        "home_water": decimal_to_hk_water(odds.get("home_water", 0.95)),
+        "away_water": decimal_to_hk_water(odds.get("away_water", 0.95)),
         "over_line": odds.get("over_line", ""),
-        "over_water": odds.get("over_water", 0),
-        "under_water": odds.get("under_water", 0),
+        "over_water": decimal_to_hk_water(odds.get("over_water", 0)),
+        "under_water": decimal_to_hk_water(odds.get("under_water", 0)),
     }, phase="early", source=source)
     return True

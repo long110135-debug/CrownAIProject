@@ -111,21 +111,25 @@ def auto_settle(target_date: str = None, settle_all: bool = False):
         save_match_result(pred['match_id'], home_goals, away_goals, winner,
                          handicap_result, ou_result, source="api-football")
 
-        # 判断命中
+        # 判断命中(唯一结算函数: 按推荐方向+盘口+比分)
+        from utils.odds_math import settle_asian_handicap
         recommend = pred.get('recommend', '')
-        if not recommend or recommend == 'neutral':
-            # 无方向推荐 = 系统没做预测，不计入命中率
-            hit = 2  # 2 = 未推荐(不参与统计)
-            error_reason = ""
-        elif recommend == winner:
+        asian_line = pred.get('asian_live') or pred.get('asian_open') or ''
+        hit_result = settle_asian_handicap(recommend, asian_line, home_goals, away_goals)
+        # 整数hit向后兼容: win/half_win=1命中, loss/half_loss=0未中, push/no_bet/invalid=2不参与命中率
+        if hit_result in ("win", "half_win"):
             hit = 1
             error_reason = ""
-        else:
+        elif hit_result in ("loss", "half_loss"):
             hit = 0
             error_reason = _analyze_error(pred, winner, score_str)
+        else:
+            hit = 2  # push/no_bet/invalid 不计入命中率
+            error_reason = ""
 
         # 结算预测
-        settle_prediction(pred['match_id'], winner, score_str, hit, error_reason)
+        settle_prediction(pred['match_id'], winner, score_str, hit, error_reason,
+                          hit_result=hit_result)
 
         # 计算CLV
         settle_match_clv(pred['match_id'])
@@ -137,7 +141,7 @@ def auto_settle(target_date: str = None, settle_all: bool = False):
         _save_validation_record(pred, hit, winner, score_str, handicap_result)
 
         # 影子对照实验结算
-        _settle_shadow_experiment(pred['match_id'], winner, handicap_result)
+        _settle_shadow_experiment(pred, home_goals, away_goals)
 
         settled_count += 1
         if hit == 1:
@@ -356,22 +360,17 @@ def _save_validation_record(pred: dict, hit: int, winner: str, score_str: str, h
     })
 
 
-def _settle_shadow_experiment(match_id: str, winner: str, handicap_result: str):
+def _settle_shadow_experiment(pred: dict, home_goals: int, away_goals: int):
     """
-    结算影子对照实验(幂等: 已结算则跳过)
-    
-    方向结算规则(亚盘上下文):
-    - neutral → no_bet (不参与命中率)
-    - draw → invalid (亚盘不支持平局方向)
-    - home + winner=home → win (+1)
-    - home + winner=away → loss (-1)
-    - home + winner=draw + handicap_result=home_cover → win (+1)
-    - home + winner=draw + handicap_result=away_cover → loss (-1)
-    - home + winner=draw + handicap_result=push → push (0)
-    - away 同理反向
+    结算影子对照实验(幂等: 已结算则跳过)。
+
+    legacy与consensus方向均调用唯一结算函数 settle_asian_handicap，
+    按分析时盘口(asian_live→asian_open)与比分结算，支持半赢/半输。
     """
     from utils.database import get_connection, settle_experiment
+    from utils.odds_math import settle_asian_handicap, hit_to_pnl
 
+    match_id = pred['match_id']
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -386,57 +385,15 @@ def _settle_shadow_experiment(match_id: str, winner: str, handicap_result: str):
     if row["settled_at"]:
         return  # 已结算，幂等跳过
 
-    legacy_hit = _direction_to_hit(row["legacy_recommend"], winner, handicap_result)
-    consensus_hit = _direction_to_hit(row["consensus_recommend"], winner, handicap_result)
+    asian_line = pred.get('asian_live') or pred.get('asian_open') or ''
 
-    legacy_pnl = _hit_to_pnl(legacy_hit)
-    consensus_pnl = _hit_to_pnl(consensus_hit)
+    legacy_hit = settle_asian_handicap(row["legacy_recommend"], asian_line, home_goals, away_goals)
+    consensus_hit = settle_asian_handicap(row["consensus_recommend"], asian_line, home_goals, away_goals)
+
+    legacy_pnl = hit_to_pnl(legacy_hit)
+    consensus_pnl = hit_to_pnl(consensus_hit)
 
     settle_experiment(match_id, legacy_hit, consensus_hit, legacy_pnl, consensus_pnl)
-
-
-def _direction_to_hit(direction: str, winner: str, handicap_result: str) -> str:
-    """
-    将推荐方向与实际结果对比，产出结算结果。
-    
-    返回: win/half_win/push/half_loss/loss/no_bet/invalid
-    """
-    if not direction or direction == "neutral":
-        return "no_bet"
-    if direction == "draw":
-        return "invalid"  # 亚盘不支持平局方向
-
-    # 方向与实际胜者一致 → win
-    if direction == winner:
-        return "win"
-
-    # 方向与实际胜者相反
-    if winner == "draw":
-        # 平局时看让球结果
-        if handicap_result == "home_cover" and direction == "home":
-            return "win"
-        elif handicap_result == "away_cover" and direction == "away":
-            return "win"
-        elif handicap_result == "push":
-            return "push"
-        else:
-            return "loss"
-    else:
-        return "loss"
-
-
-def _hit_to_pnl(hit: str):
-    """结算结果转单位收益"""
-    pnl_map = {
-        "win": 1.0,
-        "half_win": 0.5,
-        "push": 0.0,
-        "half_loss": -0.5,
-        "loss": -1.0,
-        "no_bet": None,
-        "invalid": None,
-    }
-    return pnl_map.get(hit)
 
 
 def _analyze_error(pred: dict, actual: str, score_str: str) -> str:

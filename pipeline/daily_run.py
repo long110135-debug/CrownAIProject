@@ -44,7 +44,7 @@ def sync_today() -> int:
     today = datetime.now().strftime('%Y-%m-%d')
     now = datetime.now()
     season = now.year if now.month >= 7 else now.year - 1
-    nordic_leagues = {113, 244, 103, 119}
+    nordic_leagues = {113, 114, 244, 103, 119}
 
     client = APIFootballClient()
     if not client.api_key:
@@ -62,7 +62,7 @@ def sync_today() -> int:
                     away_en = f['teams']['away']['name']
                     home_cn = en_to_cn.get(home_en, home_en)
                     away_cn = en_to_cn.get(away_en, away_en)
-                    kickoff = f['fixture']['date'][:16].replace('T', ' ')
+                    kickoff = client._format_time(f['fixture']['date'])
                     match_id = f"CROWN_{name}_{home_cn}_{away_cn}_{today}"
 
                     save_match({
@@ -209,14 +209,7 @@ def analyze_matches(hours_ahead: int = 6) -> dict:
 
     for m in l2_passed:
         match_id = m['match_id']
-        latest = get_latest_odds(match_id)
-        odds_data = {
-            'asian_handicap': latest.get('handicap', '') if latest else '',
-            'home_odds': latest.get('home_water', 0.95) if latest else 0.95,
-            'away_odds': latest.get('away_water', 0.95) if latest else 0.95,
-            'open_handicap': '', 'current_handicap': latest.get('handicap', '') if latest else '',
-            'change_type': '不变', 'over_under': '', 'over_odds': 0, 'under_odds': 0,
-        }
+        odds_data = _build_odds_data(match_id)
 
         # 预取球队数据注入模型(模型自身不访问DB)
         home_stats = get_team_stats(m['home_team'], m['league'])
@@ -270,7 +263,7 @@ def analyze_matches(hours_ahead: int = 6) -> dict:
         save_prediction({'match_id': match_id, 'league': m['league'],
             'home_team': m['home_team'], 'away_team': m['away_team'],
             'kickoff': m['match_time'],
-            'asian_open': odds_data.get('asian_handicap', ''),
+            'asian_open': odds_data.get('open_handicap', ''),
             'asian_live': odds_data.get('current_handicap', ''),
             'crown_index': crown['crown_index'],
             'strength_score': sr.get('score', 0), 'handicap_score': hr.get('score', 0),
@@ -317,6 +310,159 @@ def close_odds():
     from pipeline.odds_tracker import lock_closing_odds
     log.info("[close] 锁定临场收盘赔率...")
     lock_closing_odds(hours_before_kickoff=1.0)
+
+
+# ═══════════════════════════════════════════
+# 4.5 临场二次分析(开赛前15~45分钟)
+# ═══════════════════════════════════════════
+
+def prematch_analyze(window_min: int = 45, window_max: int = 15) -> dict:
+    """
+    临场二次分析: 对已有首次分析、即将开赛的比赛，用最新盘口重跑五模型。
+
+    只更新 prematch_* 列，不覆盖首次分析结果，不触碰结算字段。
+
+    参数:
+        window_min: 窗口上限(开赛前N分钟开始触发)，默认45
+        window_max: 窗口下限(开赛前N分钟截止)，默认15
+
+    返回: {"updated": int, "matches": [...]}
+    """
+    from models.strength_model import StrengthModel
+    from models.handicap_model import HandicapModel
+    from models.squad_model import SquadModel
+    from models.market_model import MarketModel
+    from models.ai_referee import AIRefereeModel
+    from pipeline.crown_score import calc_crown_index
+    from pipeline.recommender import _consensus_direction
+    from utils.database import (
+        get_team_stats, save_prematch_update, save_prematch_experiment,
+        get_latest_odds,
+    )
+    from scraper.apifootball_data import APIFootballClient
+
+    now = datetime.now()
+    today = now.strftime('%Y-%m-%d')
+
+    # 计算时间窗口: 开赛前 window_min ~ window_max 分钟
+    win_start = now + timedelta(minutes=window_max)   # 最近的比赛(15分钟后)
+    win_end = now + timedelta(minutes=window_min)     # 最远的比赛(45分钟后)
+
+    # 找出窗口内、已有首次分析、未结算、未做过临场分析的比赛
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT m.match_id, m.league, m.home_team, m.away_team, m.match_time
+        FROM matches m
+        JOIN prediction_history p ON m.match_id = p.match_id
+        WHERE m.status = 'pending'
+          AND p.settled_at IS NULL
+          AND p.prematch_at IS NULL
+          AND m.match_time >= ?
+          AND m.match_time <= ?
+    """, (win_start.strftime('%Y-%m-%d %H:%M'), win_end.strftime('%Y-%m-%d %H:%M')))
+    candidates = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+
+    if not candidates:
+        log.info(f"[prematch] 无{window_max}~{window_min}分钟内待二次分析的比赛")
+        return {"updated": 0, "matches": []}
+
+    log.info(f"[prematch] 临场窗口: {len(candidates)}场待二次分析")
+
+    # 初始化模型
+    sm, hm, sqm, mm, ai = StrengthModel(), HandicapModel(), SquadModel(), MarketModel(), AIRefereeModel()
+    client = APIFootballClient()
+    updated = []
+
+    for m in candidates:
+        match_id = m['match_id']
+
+        # Step 1: 强制刷新最新盘口(写入timeline)
+        _prematch_refresh_odds(client, m, today)
+
+        # Step 2: 用最新盘口(含真实开盘→当前变动)重跑五模型
+        odds_data = _build_odds_data(match_id)
+        if not odds_data.get('asian_handicap'):
+            log.info(f"  跳过 {m['home_team']} vs {m['away_team']}: 无盘口数据")
+            continue
+
+        home_stats = get_team_stats(m['home_team'], m['league'])
+        away_stats = get_team_stats(m['away_team'], m['league'])
+
+        mi = {'match_id': match_id, 'home_team': m['home_team'], 'away_team': m['away_team'],
+              'league': m['league'], 'match_time': m['match_time'], 'odds': odds_data,
+              'odds_history': [], 'home_stats': home_stats or {}, 'away_stats': away_stats or {},
+              'home_squad': {}, 'away_squad': {}}
+
+        sr = sm.analyze(mi)
+        hr = hm.analyze(mi)
+        sqr = sqm.analyze(mi)
+        mr = mm.analyze(mi)
+        model_results = {'strength': sr, 'handicap': hr, 'squad': sqr, 'market': mr}
+        mi['model_results'] = model_results
+        mi['strength_direction'] = sr.get('direction', 'neutral')
+        ar = ai.analyze(mi)
+        model_results['ai_referee'] = ar
+        crown = calc_crown_index(model_results, odds_data)
+
+        # Step 3: 写入prematch列(不覆盖首次分析)
+        prematch_rec = {
+            'prematch_at': now.strftime('%Y-%m-%d %H:%M:%S'),
+            'prematch_handicap': odds_data.get('asian_handicap', ''),
+            'prematch_home_water': odds_data.get('home_odds', 0),
+            'prematch_away_water': odds_data.get('away_odds', 0),
+            'prematch_crown_index': crown['crown_index'],
+            'prematch_recommend': sr.get('direction', 'neutral'),
+            'prematch_strength_score': sr.get('score', 0),
+            'prematch_handicap_score': hr.get('score', 0),
+            'prematch_market_score': mr.get('score', 0),
+        }
+        save_prematch_update(match_id, prematch_rec)
+
+        # Step 4: 更新影子实验临场共识
+        consensus_dir = _consensus_direction(model_results)
+        consensus_reason = _build_consensus_reason(model_results, consensus_dir)
+        save_prematch_experiment(match_id, consensus_dir, consensus_reason)
+
+        updated.append({
+            'match_id': match_id,
+            'home_team': m['home_team'],
+            'away_team': m['away_team'],
+            'prematch_handicap': odds_data.get('asian_handicap', ''),
+            'prematch_crown_index': crown['crown_index'],
+            'prematch_recommend': sr.get('direction', 'neutral'),
+            'consensus': consensus_dir,
+        })
+
+        log.info(f"  ✓ {m['home_team']} vs {m['away_team']} | "
+                 f"盘口:{odds_data.get('asian_handicap', '')} "
+                 f"主水:{odds_data.get('home_odds', '')} "
+                 f"指数:{crown['crown_index']} "
+                 f"legacy:{sr.get('direction', 'neutral')} "
+                 f"consensus:{consensus_dir}")
+
+    log.info(f"[prematch] 完成: {len(updated)}场临场更新")
+    return {"updated": len(updated), "matches": updated}
+
+
+def _prematch_refresh_odds(client, match: dict, date_str: str) -> Optional[dict]:
+    """临场强制刷新一次盘口数据，返回最新odds dict或None"""
+    try:
+        from scraper.apifootball_odds import fetch_odds_for_fixture
+        from scraper.crown_odds_collector import save_api_odds
+
+        fixture_id = _resolve_fixture_id(client, match, date_str)
+        if not fixture_id:
+            return None
+        odds = fetch_odds_for_fixture(client, fixture_id)
+        if odds and odds.get("handicap"):
+            source = f"api-football({odds.get('bookmaker', '')})"
+            save_api_odds(match['match_id'], odds, source=source)
+            return odds
+    except Exception as e:
+        log.warning(f"[prematch] 盘口刷新失败 {match['home_team']}: {e}")
+    return None
 
 
 # ═══════════════════════════════════════════
@@ -420,7 +566,7 @@ def _resolve_fixture_id(client, match: dict, date_str: str):
     away_en = cn_to_en.get(match['away_team'], match['away_team'])
 
     now = datetime.now()
-    season = now.year if league_id in {113, 244, 103, 119} else (now.year if now.month >= 7 else now.year - 1)
+    season = now.year if league_id in {113, 114, 244, 103, 119} else (now.year if now.month >= 7 else now.year - 1)
 
     data = client._request('fixtures', {'date': date_str, 'league': league_id, 'season': season})
     if data and data.get('response'):
@@ -435,6 +581,49 @@ def _resolve_fixture_id(client, match: dict, date_str: str):
 
 
 from utils.helpers import parse_match_time as _parse_time
+
+
+def _build_odds_data(match_id: str) -> dict:
+    """
+    从odds_timeline构建真实odds_data(含开盘→当前的盘口变动)。
+
+    替代旧的硬编码(change_type='不变'/open_handicap=''/over_under='')。
+    用utils.odds_math.compute_change(升盘/降盘判断的唯一实现)计算真实变动类型，
+    让handicap模型和crown_index反映真实盘口变化，解除72.5的管线天花板。
+    """
+    from utils.database import get_opening_odds, get_latest_odds
+    from utils.odds_math import compute_change
+
+    latest = get_latest_odds(match_id)
+    if not latest:
+        return {
+            'asian_handicap': '', 'home_odds': 0.95, 'away_odds': 0.95,
+            'open_handicap': '', 'current_handicap': '',
+            'change_type': '不变', 'over_under': '', 'over_odds': 0, 'under_odds': 0,
+        }
+
+    opening = get_opening_odds(match_id) or latest
+
+    curr_hdp = latest.get('handicap', '') or ''
+    open_hdp = opening.get('handicap', '') or ''
+    curr_hw = latest.get('home_water') or 0.95
+    open_hw = opening.get('home_water') or 0.95
+    curr_aw = latest.get('away_water') or 0.95
+    open_aw = opening.get('away_water') or 0.95
+
+    change = compute_change(open_hdp, curr_hdp, open_hw, curr_hw, open_aw, curr_aw)
+
+    return {
+        'asian_handicap': curr_hdp,
+        'home_odds': curr_hw,
+        'away_odds': curr_aw,
+        'open_handicap': open_hdp,
+        'current_handicap': curr_hdp,
+        'change_type': change.get('change_type', '不变'),
+        'over_under': latest.get('over_line', '') or '',
+        'over_odds': latest.get('over_water', 0) or 0,
+        'under_odds': latest.get('under_water', 0) or 0,
+    }
 
 
 def _build_consensus_reason(model_results: dict, consensus_dir: str) -> str:
@@ -456,6 +645,11 @@ def _build_consensus_reason(model_results: dict, consensus_dir: str) -> str:
         confidence = result.get("confidence", 0) / 100
         weight = MODEL_WEIGHTS.get(name, 0.1)
         effective = weight * confidence
+
+        # ai_referee是裁决模型，direction为多数票复制，不计入方向投票(仅记录)
+        if name == "ai_referee":
+            parts.append(f"{name}:{direction}(excluded_referee)")
+            continue
 
         if direction == "home":
             home_w += effective

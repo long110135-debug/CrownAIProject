@@ -170,36 +170,39 @@ class HandicapModel(BaseModel):
         return 50
 
     def _determine_direction(self, odds: dict, change_score: float, water_score: float) -> str:
-        """综合判断盘口方向"""
+        """
+        综合判断盘口方向。
+
+        优先级:
+        1. 盘口变动(升盘/降盘)是强市场动量信号 → 跟随变动方向
+        2. 无变动时，让球盘以让球方(热门)为方向 —— 修复P0:
+           受让方天然低水，"低水=被看好"对让球盘是系统性误判
+        3. 平手盘无让球方且无变动 → 退回水位方向
+        """
+        from utils.odds_math import line_favorite
+
         change_type = odds.get("change_type", "不变")
+        handicap = odds.get("current_handicap") or odds.get("asian_handicap", "")
         home_odds = odds.get("home_odds", 0.95)
         away_odds = odds.get("away_odds", 0.95)
 
-        # 盘口变化方向
+        # 1. 盘口变动方向(升盘=主队信心增强, 降盘=客队)
         if change_type == "升盘":
-            change_dir = "home"
+            return "home"
         elif change_type == "降盘":
-            change_dir = "away"
-        else:
-            change_dir = "neutral"
+            return "away"
 
-        # 水位方向
+        # 2. 无变动: 让球盘以让球方为方向(热门=预测胜者)
+        fav = line_favorite(handicap)
+        if fav != "neutral":
+            return fav
+
+        # 3. 平手盘: 用水位方向
         if home_odds < away_odds - 0.05:
-            water_dir = "home"
+            return "home"
         elif away_odds < home_odds - 0.05:
-            water_dir = "away"
-        else:
-            water_dir = "neutral"
-
-        # 综合
-        if change_dir == water_dir and change_dir != "neutral":
-            return change_dir  # 盘口+水位一致，强信号
-        elif change_dir != "neutral":
-            return change_dir  # 以盘口变化为主
-        elif water_dir != "neutral":
-            return water_dir
-        else:
-            return "neutral"
+            return "away"
+        return "neutral"
 
     def _calc_confidence(self, score: float, odds: dict) -> float:
         """计算可信度"""
