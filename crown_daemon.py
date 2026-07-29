@@ -111,49 +111,59 @@ class CrownDaemon:
 
             # 抓取"今日"和"早盘"两个页面
             for showtype in ('today', 'early'):
-                # 导航到对应联赛列表
-                self.page.evaluate('''(showtype) => {
-                    var el_id = showtype === 'today' ? 'h_ft_today_league' : 'h_ft_early_league';
-                    var el = document.getElementById(el_id);
-                    if (el) el.click();
-                    if (typeof parentClass !== 'undefined' && parentClass.dispatchEvent) {
-                        parentClass.dispatchEvent('bodyGoToPage', {
-                            page: 'league_index', gtype: 'ft', showtype: showtype
-                        });
-                    }
-                }''', showtype)
-                time.sleep(8)
-
-                # 移除遮罩
-                self.page.evaluate('''() => {
-                    var cleandata = document.getElementById('div_cleandata');
-                    if (cleandata) cleandata.style.display = 'none';
-                }''')
-
-                # 获取联赛列表
-                leagues = self.page.evaluate('''() => {
-                var results = [];
-                var els = document.querySelectorAll('[id^=league_]');
-                for (var i = 0; i < els.length; i++) {
-                    var el = els[i];
-                    if (!/^league_\\d+$/.test(el.id)) continue;
-                    var rect = el.getBoundingClientRect();
-                    if (rect.height > 0 && rect.width > 0) {
-                        var name = '';
-                        var count = 0;
-                        var spans = el.querySelectorAll('span');
-                        for (var j = 0; j < spans.length; j++) {
-                            var t = spans[j].textContent.trim();
-                            if (t && isNaN(t) && t.length > 2) name = t;
-                            if (t && !isNaN(t)) count = parseInt(t);
+                # 导航+轮询等待联赛列表(带重试，应对皇冠SPA异步渲染不稳定)
+                leagues = []
+                for _attempt in range(3):  # 最多重试3次导航
+                    # 导航到对应联赛列表
+                    self.page.evaluate('''(showtype) => {
+                        var el_id = showtype === 'today' ? 'h_ft_today_league' : 'h_ft_early_league';
+                        var el = document.getElementById(el_id);
+                        if (el) el.click();
+                        if (typeof parentClass !== 'undefined' && parentClass.dispatchEvent) {
+                            parentClass.dispatchEvent('bodyGoToPage', {
+                                page: 'league_index', gtype: 'ft', showtype: showtype
+                            });
                         }
-                        if (!name) name = el.textContent.trim().replace(/\\d+/g, '').trim();
-                        if (name) results.push({id: el.id, name: name, count: count,
-                            x: rect.x + rect.width/2, y: rect.y + rect.height/2});
-                    }
-                }
-                return results;
-            }''')
+                    }''', showtype)
+
+                    # 轮询等待联赛条目(league_数字)异步加载完成
+                    for _wait in range(10):  # 每次最多约20秒
+                        time.sleep(2)
+                        # 移除遮罩
+                        self.page.evaluate('''() => {
+                            var cleandata = document.getElementById('div_cleandata');
+                            if (cleandata) cleandata.style.display = 'none';
+                        }''')
+                        # 获取联赛列表
+                        leagues = self.page.evaluate('''() => {
+                        var results = [];
+                        var els = document.querySelectorAll('[id^=league_]');
+                        for (var i = 0; i < els.length; i++) {
+                            var el = els[i];
+                            if (!/^league_\\d+$/.test(el.id)) continue;
+                            var rect = el.getBoundingClientRect();
+                            if (rect.height > 0 && rect.width > 0) {
+                                var name = '';
+                                var count = 0;
+                                var spans = el.querySelectorAll('span');
+                                for (var j = 0; j < spans.length; j++) {
+                                    var t = spans[j].textContent.trim();
+                                    if (t && isNaN(t) && t.length > 2) name = t;
+                                    if (t && !isNaN(t)) count = parseInt(t);
+                                }
+                                if (!name) name = el.textContent.trim().replace(/\\d+/g, '').trim();
+                                if (name) results.push({id: el.id, name: name, count: count,
+                                    x: rect.x + rect.width/2, y: rect.y + rect.height/2});
+                            }
+                        }
+                        return results;
+                    }''')
+                        if leagues:
+                            break
+                    if leagues:
+                        log.info(f"[皇冠守护] {showtype}: 联赛列表已加载({len(leagues)}个, 第{_attempt+1}次尝试)")
+                        break
+                    log.info(f"[皇冠守护] {showtype}: 第{_attempt+1}次导航未加载到联赛列表，重试...")
 
                 # 过滤目标联赛
                 target = []
